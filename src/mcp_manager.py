@@ -12,6 +12,17 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+REMOTE_HTTP_TRANSPORTS = {"http", "streamable-http", "streamable_http"}
+
+
+def normalize_mcp_transport(transport: str) -> str:
+    """Normalize user-facing MCP transport aliases to internal names."""
+    value = (transport or "").strip().lower()
+    if value in REMOTE_HTTP_TRANSPORTS:
+        return "streamable_http"
+    return value
+
+
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
     args = args or []
@@ -29,6 +40,37 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
 
     return raw_error
 
+
+class FileTokenStorage:
+    """File-backed token storage implementing the MCP SDK TokenStorage protocol."""
+
+    def __init__(self, token_file: str):
+        self._token_file = token_file
+        self._client_info_file = token_file.replace(".json", "_client.json")
+
+    async def get_tokens(self):
+        from mcp.shared.auth import OAuthToken
+        if os.path.exists(self._token_file):
+            with open(self._token_file) as f:
+                return OAuthToken.model_validate(json.load(f))
+        return None
+
+    async def set_tokens(self, tokens) -> None:
+        os.makedirs(os.path.dirname(self._token_file), exist_ok=True)
+        with open(self._token_file, "w") as f:
+            json.dump(tokens.model_dump(mode="json"), f, indent=2)
+
+    async def get_client_info(self):
+        from mcp.shared.auth import OAuthClientInformationFull
+        if os.path.exists(self._client_info_file):
+            with open(self._client_info_file) as f:
+                return OAuthClientInformationFull.model_validate(json.load(f))
+        return None
+
+    async def set_client_info(self, client_info) -> None:
+        os.makedirs(os.path.dirname(self._client_info_file), exist_ok=True)
+        with open(self._client_info_file, "w") as f:
+            json.dump(client_info.model_dump(mode="json"), f, indent=2)
 
 
 class McpManager:
@@ -55,13 +97,17 @@ class McpManager:
         args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
         url: Optional[str] = None,
+        oauth_config: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Connect to an MCP server via stdio or SSE transport."""
+        """Connect to an MCP server via stdio, SSE, or streamable_http transport."""
         try:
+            transport = normalize_mcp_transport(transport)
             if transport == "stdio":
                 res = await self._connect_stdio(server_id, name, command, args or [], env or {})
             elif transport == "sse":
-                res = await self._connect_sse(server_id, name, url)
+                res = await self._connect_sse(server_id, name, url, oauth_config)
+            elif transport == "streamable_http":
+                res = await self._connect_streamable_http(server_id, name, url, oauth_config)
             else:
                 logger.error(f"Unknown MCP transport: {transport}")
                 res = False
@@ -138,16 +184,52 @@ class McpManager:
             self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
             return False
 
-    async def _connect_sse(self, server_id: str, name: str, url: str) -> bool:
+    def _build_oauth_auth(self, url: str, oauth_config: dict):
+        """Build OAuthClientProvider from oauth_config dict, or return None."""
+        from pydantic import AnyUrl
+        from mcp.client.auth import OAuthClientProvider
+        from mcp.shared.auth import OAuthClientMetadata
+
+        token_file = os.path.expanduser(oauth_config.get("token_file", ""))
+        redirect_uris_raw = oauth_config.get("redirect_uris") or [
+            "http://localhost:7000/api/mcp/oauth/callback"
+        ]
+        redirect_uris = [
+            u if isinstance(u, AnyUrl) else AnyUrl(u) for u in redirect_uris_raw
+        ]
+        scope = oauth_config.get("scope") or oauth_config.get("scopes")
+        if isinstance(scope, list):
+            scope = " ".join(scope)
+
+        storage = FileTokenStorage(token_file)
+        client_metadata = OAuthClientMetadata(
+            client_name=oauth_config.get("client_name", "Odysseus"),
+            redirect_uris=redirect_uris,
+            grant_types=oauth_config.get("grant_types", ["authorization_code", "refresh_token"]),
+            response_types=oauth_config.get("response_types", ["code"]),
+            scope=scope,
+        )
+        return OAuthClientProvider(
+            server_url=url,
+            client_metadata=client_metadata,
+            storage=storage,
+            redirect_handler=oauth_config.get("_redirect_handler"),
+            callback_handler=oauth_config.get("_callback_handler"),
+            client_metadata_url=oauth_config.get("client_metadata_url"),
+        )
+
+    async def _connect_sse(self, server_id: str, name: str, url: str, oauth_config: dict = None) -> bool:
         """Connect to an MCP server via SSE transport."""
         try:
             from mcp import ClientSession
             from mcp.client.sse import sse_client
             from contextlib import AsyncExitStack
 
+            auth = self._build_oauth_auth(url, oauth_config) if oauth_config else None
+
             stack = AsyncExitStack()
             try:
-                transport = await stack.enter_async_context(sse_client(url))
+                transport = await stack.enter_async_context(sse_client(url, auth=auth))
                 read_stream, write_stream = transport
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
 
@@ -177,6 +259,54 @@ class McpManager:
             }
 
             logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via SSE")
+            return True
+
+        except ImportError:
+            logger.warning("MCP package not installed. Install with: pip install mcp")
+            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
+            return False
+
+    async def _connect_streamable_http(self, server_id: str, name: str, url: str, oauth_config: dict = None) -> bool:
+        """Connect to an MCP server via Streamable HTTP transport."""
+        try:
+            from contextlib import AsyncExitStack
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamablehttp_client
+
+            auth = self._build_oauth_auth(url, oauth_config) if oauth_config else None
+
+            stack = AsyncExitStack()
+            try:
+                transport = await stack.enter_async_context(streamablehttp_client(url, auth=auth))
+                read_stream, write_stream, get_session_id = transport
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+
+                await session.initialize()
+                tools_result = await session.list_tools()
+            except Exception:
+                await stack.aclose()
+                raise
+
+            tools = []
+            for tool in tools_result.tools:
+                tools.append({
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": tool.inputSchema if hasattr(tool, 'inputSchema') else {},
+                })
+
+            self._sessions[server_id] = session
+            self._stacks[server_id] = stack
+            self._tools[server_id] = tools
+            self._connections[server_id] = {
+                "status": "connected",
+                "name": name,
+                "transport": "streamable_http",
+                "tool_count": len(tools),
+                "session_id": get_session_id() if callable(get_session_id) else None,
+            }
+
+            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via Streamable HTTP")
             return True
 
         except ImportError:
@@ -215,6 +345,15 @@ class McpManager:
             for srv in servers:
                 args = json.loads(srv.args) if srv.args else []
                 env = json.loads(srv.env) if srv.env else {}
+                oauth_config = json.loads(srv.oauth_config) if srv.oauth_config else None
+                token_file = os.path.expanduser(oauth_config.get("token_file", "")) if oauth_config else ""
+                if token_file and not os.path.exists(token_file):
+                    self._connections[srv.id] = {
+                        "status": "needs_oauth",
+                        "name": srv.name,
+                        "error": "OAuth authorization required",
+                    }
+                    continue
                 await self.connect_server(
                     server_id=srv.id,
                     name=srv.name,
@@ -223,6 +362,7 @@ class McpManager:
                     args=args,
                     env=env,
                     url=srv.url,
+                    oauth_config=oauth_config,
                 )
         finally:
             db.close()

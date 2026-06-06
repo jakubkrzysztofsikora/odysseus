@@ -23,6 +23,7 @@ def test_reconnect_passes_full_server_config():
         args=json.dumps(["--flag"]),
         env=json.dumps({"KEY": "val"}),
         url=None,
+        oauth_config=json.dumps({"token_file": "/tmp/mcp-token.json", "scopes": ["read"]}),
     )
 
     fake_db = MagicMock()
@@ -43,4 +44,5 @@ def test_reconnect_passes_full_server_config():
         args=["--flag"],
         env={"KEY": "val"},
         url=None,
+        oauth_config={"token_file": "/tmp/mcp-token.json", "scopes": ["read"]},
     )

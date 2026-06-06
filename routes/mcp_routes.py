@@ -1,7 +1,9 @@
 # routes/mcp_routes.py
 """MCP (Model Context Protocol) server management routes."""
+import asyncio
 import json
 import os
+import secrets
 import uuid
 import urllib.parse
 import html
@@ -12,11 +14,73 @@ import httpx
 
 from core.database import McpServer, SessionLocal
 from core.middleware import require_admin
-from src.mcp_manager import McpManager
+from src.mcp_manager import McpManager, normalize_mcp_transport
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+
+MCP_OAUTH_DEFAULT_REDIRECT = os.getenv(
+    "MCP_OAUTH_REDIRECT_URI",
+    "http://localhost:7860/api/mcp/oauth/callback",
+)
+_PENDING_MCP_OAUTH: dict[str, dict] = {}
+_MCP_OAUTH_STATE_TO_FLOW: dict[str, str] = {}
+
+
+def _json_or(value: str | None, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def _server_runtime_config(srv: McpServer) -> tuple[list, dict, dict | None]:
+    return (
+        _json_or(srv.args, []),
+        _json_or(srv.env, {}),
+        _json_or(srv.oauth_config, None),
+    )
+
+
+def _oauth_provider(oauth_cfg: dict | None) -> str:
+    return str((oauth_cfg or {}).get("provider") or "").strip().lower()
+
+
+def _oauth_token_missing(oauth_cfg: dict | None) -> bool:
+    if not oauth_cfg:
+        return False
+    token_file = os.path.expanduser(oauth_cfg.get("token_file", ""))
+    return bool(token_file) and not os.path.exists(token_file)
+
+
+def _default_remote_mcp_oauth_config(server_id: str) -> dict:
+    return {
+        "provider": "mcp",
+        "client_name": "Odysseus",
+        "token_file": f"~/.odysseus/mcp-oauth/{server_id}.json",
+        "redirect_uris": [MCP_OAUTH_DEFAULT_REDIRECT],
+    }
+
+
+def _looks_like_remote_auth_error(error: str | None) -> bool:
+    lower = (error or "").lower()
+    return any(marker in lower for marker in ("401", "unauthorized", "authentication", "oauth"))
+
+
+async def _remote_advertises_oauth(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            resp = await client.get(url, headers={"Accept": "application/json, text/event-stream"})
+        www_auth = resp.headers.get("www-authenticate", "")
+        return resp.status_code == 401 and "bearer" in www_auth.lower()
+    except Exception as e:
+        logger.debug("Remote MCP OAuth probe failed for %s: %s", url, e)
+        return False
 
 
 def _load_disabled_map():
@@ -97,10 +161,13 @@ def setup_mcp_routes(mcp_manager: McpManager):
         server_id = str(uuid.uuid4())[:8]
 
         # Validate
+        transport = normalize_mcp_transport(transport)
         if transport == "stdio" and not command:
             raise HTTPException(400, "command is required for stdio transport")
-        if transport == "sse" and not url:
-            raise HTTPException(400, "url is required for SSE transport")
+        if transport in {"sse", "streamable_http"} and not url:
+            raise HTTPException(400, "url is required for remote MCP transport")
+        if transport not in {"stdio", "sse", "streamable_http"}:
+            raise HTTPException(400, f"unsupported MCP transport: {transport}")
 
         # Parse JSON fields
         try:
@@ -119,6 +186,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 parsed_oauth_config = json.loads(oauth_config)
             except json.JSONDecodeError:
                 pass
+        elif transport in {"sse", "streamable_http"} and await _remote_advertises_oauth(url):
+            parsed_oauth_config = _default_remote_mcp_oauth_config(server_id)
 
         # Write OAuth credentials file if provided (for Google MCP servers)
         logger.info(f"MCP add_server: oauth_file={oauth_file!r}")
@@ -170,10 +239,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
 
         # Check if OAuth token already exists — skip connection attempt if not
         needs_oauth = False
-        if parsed_oauth_config:
-            token_file = os.path.expanduser(parsed_oauth_config.get("token_file", ""))
-            if token_file and not os.path.exists(token_file):
-                needs_oauth = True
+        if parsed_oauth_config and _oauth_token_missing(parsed_oauth_config):
+            needs_oauth = True
 
         connected = False
         if not needs_oauth:
@@ -185,9 +252,27 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 args=parsed_args,
                 env=parsed_env,
                 url=url,
+                oauth_config=parsed_oauth_config,
             )
 
         status = mcp_manager.get_server_status(server_id)
+        if (
+            not connected
+            and not parsed_oauth_config
+            and transport in {"sse", "streamable_http"}
+            and _looks_like_remote_auth_error(status.get("error"))
+        ):
+            parsed_oauth_config = _default_remote_mcp_oauth_config(server_id)
+            db = SessionLocal()
+            try:
+                srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+                if srv:
+                    srv.oauth_config = json.dumps(parsed_oauth_config)
+                    db.commit()
+            finally:
+                db.close()
+            needs_oauth = True
+
         return {
             "id": server_id,
             "name": name,
@@ -210,8 +295,15 @@ def setup_mcp_routes(mcp_manager: McpManager):
 
             await mcp_manager.disconnect_server(server_id)
 
-            args = json.loads(srv.args) if srv.args else []
-            env = json.loads(srv.env) if srv.env else {}
+            args, env, oauth_config = _server_runtime_config(srv)
+            if _oauth_token_missing(oauth_config):
+                return {
+                    "connected": False,
+                    "status": "needs_oauth",
+                    "tool_count": 0,
+                    "error": "OAuth authorization required",
+                    "needs_oauth": True,
+                }
             connected = await mcp_manager.connect_server(
                 server_id=server_id,
                 name=srv.name,
@@ -220,6 +312,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 args=args,
                 env=env,
                 url=srv.url,
+                oauth_config=oauth_config,
             )
 
             status = mcp_manager.get_server_status(server_id)
@@ -247,17 +340,18 @@ def setup_mcp_routes(mcp_manager: McpManager):
             db.commit()
 
             if enabled:
-                args = json.loads(srv.args) if srv.args else []
-                env = json.loads(srv.env) if srv.env else {}
-                await mcp_manager.connect_server(
-                    server_id=server_id,
-                    name=srv.name,
-                    transport=srv.transport,
-                    command=srv.command,
-                    args=args,
-                    env=env,
-                    url=srv.url,
-                )
+                args, env, oauth_config = _server_runtime_config(srv)
+                if not _oauth_token_missing(oauth_config):
+                    await mcp_manager.connect_server(
+                        server_id=server_id,
+                        name=srv.name,
+                        transport=srv.transport,
+                        command=srv.command,
+                        args=args,
+                        env=env,
+                        url=srv.url,
+                        oauth_config=oauth_config,
+                    )
             else:
                 await mcp_manager.disconnect_server(server_id)
 
@@ -338,7 +432,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
     # ── OAuth flow for Google MCP servers ──────────────────────────
 
     @router.get("/oauth/authorize/{server_id}")
-    def oauth_authorize(server_id: str, request: Request):
+    async def oauth_authorize(server_id: str, request: Request):
         """Show OAuth authorization page with Google sign-in link."""
         require_admin(request)
         db = SessionLocal()
@@ -350,6 +444,9 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 raise HTTPException(400, "Server has no OAuth config")
 
             oauth_cfg = json.loads(srv.oauth_config)
+            if _oauth_provider(oauth_cfg) != "google":
+                return await _mcp_oauth_authorize(srv, oauth_cfg, request)
+
             keys_file = os.path.expanduser(oauth_cfg.get("keys_file", ""))
             if not keys_file or not os.path.exists(keys_file):
                 raise HTTPException(400, "OAuth keys file not found")
@@ -387,13 +484,87 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 return RedirectResponse(auth_url)
             else:
                 # Remote device — show paste-back page
-                return HTMLResponse(_oauth_authorize_page(auth_url, server_id, host))
+                return HTMLResponse(_oauth_authorize_page(auth_url, server_id, host, provider_name="Google"))
         finally:
             db.close()
+
+    async def _mcp_oauth_authorize(srv: McpServer, oauth_cfg: dict, request: Request):
+        """Start an MCP SDK OAuth flow and expose its authorization URL."""
+        args, env, _ = _server_runtime_config(srv)
+        loop = asyncio.get_running_loop()
+        flow_id = secrets.token_urlsafe(18)
+        flow = {
+            "server_id": srv.id,
+            "auth_url": loop.create_future(),
+            "callback": loop.create_future(),
+            "result": loop.create_future(),
+        }
+        _PENDING_MCP_OAUTH[flow_id] = flow
+
+        async def redirect_handler(auth_url: str) -> None:
+            state = urllib.parse.parse_qs(urllib.parse.urlparse(auth_url).query).get("state", [None])[0]
+            if state:
+                _MCP_OAUTH_STATE_TO_FLOW[state] = flow_id
+            if not flow["auth_url"].done():
+                flow["auth_url"].set_result(auth_url)
+
+        async def callback_handler() -> tuple[str, str | None]:
+            return await asyncio.wait_for(flow["callback"], timeout=float(oauth_cfg.get("timeout", 300)))
+
+        oauth_for_connect = dict(oauth_cfg)
+        oauth_for_connect["_redirect_handler"] = redirect_handler
+        oauth_for_connect["_callback_handler"] = callback_handler
+
+        async def run_connect():
+            try:
+                await mcp_manager.disconnect_server(srv.id)
+                connected = await mcp_manager.connect_server(
+                    server_id=srv.id,
+                    name=srv.name,
+                    transport=srv.transport,
+                    command=srv.command,
+                    args=args,
+                    env=env,
+                    url=srv.url,
+                    oauth_config=oauth_for_connect,
+                )
+                status = mcp_manager.get_server_status(srv.id)
+                result = {
+                    "connected": connected,
+                    "tool_count": status.get("tool_count", 0),
+                    "error": status.get("error"),
+                }
+            except BaseException as e:
+                logger.exception("MCP OAuth connect failed for %s", srv.id)
+                result = {"connected": False, "tool_count": 0, "error": str(e)}
+            if not flow["result"].done():
+                flow["result"].set_result(result)
+
+        asyncio.create_task(run_connect())
+
+        try:
+            auth_url = await asyncio.wait_for(flow["auth_url"], timeout=30)
+        except asyncio.TimeoutError:
+            error = "The MCP server did not provide an OAuth authorization URL. Check the server URL and transport."
+            if flow["result"].done():
+                error = flow["result"].result().get("error") or error
+            _PENDING_MCP_OAUTH.pop(flow_id, None)
+            return HTMLResponse(
+                _oauth_result_page(
+                    "Authorization Failed",
+                    error,
+                ),
+                status_code=504,
+            )
+
+        host = request.headers.get("host", "")
+        return HTMLResponse(_oauth_authorize_page(auth_url, srv.id, host, provider_name=srv.name))
 
     @router.get("/oauth/callback")
     async def oauth_callback(code: str, state: str, request: Request):
         """Handle OAuth callback from Google — exchange code for tokens."""
+        if state in _MCP_OAUTH_STATE_TO_FLOW:
+            return await _complete_mcp_oauth_callback(code, state)
         require_admin(request)
         server_id = state
         return await _exchange_and_connect(server_id, code, request)
@@ -406,12 +577,53 @@ def setup_mcp_routes(mcp_manager: McpManager):
             parsed = urllib.parse.urlparse(callback_url)
             params = urllib.parse.parse_qs(parsed.query)
             code = params.get("code", [None])[0]
+            state = params.get("state", [None])[0]
             if not code:
                 return HTMLResponse(_oauth_result_page("Error", "No authorization code found in the URL. Make sure you copied the full URL from your browser."), status_code=400)
         except Exception:
             return HTMLResponse(_oauth_result_page("Error", "Invalid URL format."), status_code=400)
 
+        if state in _MCP_OAUTH_STATE_TO_FLOW:
+            return await _complete_mcp_oauth_callback(code, state)
         return await _exchange_and_connect(server_id, code, request)
+
+    async def _complete_mcp_oauth_callback(code: str, state: str):
+        flow_id = _MCP_OAUTH_STATE_TO_FLOW.get(state)
+        flow = _PENDING_MCP_OAUTH.get(flow_id) if flow_id else None
+        if not flow:
+            return HTMLResponse(
+                _oauth_result_page("Authorization Failed", "OAuth flow expired or was not started from Odysseus."),
+                status_code=400,
+            )
+
+        if not flow["callback"].done():
+            flow["callback"].set_result((code, state))
+
+        try:
+            result = await asyncio.wait_for(flow["result"], timeout=30)
+        except asyncio.TimeoutError:
+            return HTMLResponse(
+                _oauth_result_page("Authorization Pending", "Authorization was received, but the MCP server has not finished reconnecting yet. Try Reconnect in Settings."),
+                status_code=202,
+            )
+        finally:
+            _PENDING_MCP_OAUTH.pop(flow_id, None)
+            _MCP_OAUTH_STATE_TO_FLOW.pop(state, None)
+
+        if result.get("connected"):
+            return HTMLResponse(_oauth_result_page(
+                "Authorization Successful",
+                f"MCP server connected with {result.get('tool_count', 0)} tools. You can close this window.",
+                success=True,
+            ))
+
+        return HTMLResponse(
+            _oauth_result_page(
+                "Authorized but Connection Failed",
+                f"Tokens were received, but the server failed to connect: {result.get('error') or 'unknown error'}. Try reconnecting from Settings.",
+            ),
+            status_code=400,
+        )
 
     async def _exchange_and_connect(server_id: str, code: str, request: Request):
         """Exchange auth code for tokens and connect the MCP server."""
@@ -462,8 +674,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
             logger.info(f"Saved OAuth tokens to {token_file}")
 
             # Attempt to connect the MCP server now
-            args = json.loads(srv.args) if srv.args else []
-            env = json.loads(srv.env) if srv.env else {}
+            args, env, oauth_config = _server_runtime_config(srv)
             connected = await mcp_manager.connect_server(
                 server_id=server_id,
                 name=srv.name,
@@ -472,6 +683,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 args=args,
                 env=env,
                 url=srv.url,
+                oauth_config=oauth_config,
             )
 
             if connected:
@@ -497,13 +709,14 @@ def setup_mcp_routes(mcp_manager: McpManager):
     return router
 
 
-def _oauth_authorize_page(auth_url: str, server_id: str, host: str) -> str:
-    """Page with Google sign-in link and URL paste-back form for remote access."""
+def _oauth_authorize_page(auth_url: str, server_id: str, host: str, provider_name: str = "Provider") -> str:
+    """Page with sign-in link and URL paste-back form for remote access."""
     # Escape values interpolated into the page: `host` comes from the request
     # Host header and `server_id` from the OAuth state — neither is trusted.
     auth_url = html.escape(auth_url, quote=True)
     server_id = html.escape(server_id, quote=True)
     host = html.escape(host, quote=True)
+    provider_name = html.escape(provider_name, quote=True)
     return f"""<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8"><title>Authorize — Odysseus</title>
@@ -537,18 +750,18 @@ def _oauth_authorize_page(auth_url: str, server_id: str, host: str) -> str:
   .divider {{ border-top: 1px solid #333; margin: 1.2rem 0; }}
 </style></head>
 <body><div class="card">
-  <h2>Authorize Google Account</h2>
+  <h2>Authorize {provider_name}</h2>
   <div class="step">
-    <b>1.</b> Click the button below to sign in with Google<br>
+    <b>1.</b> Click the button below to sign in<br>
     <b>2.</b> After approving, your browser will show an error page — that's normal<br>
     <b>3.</b> Copy the full URL from your browser's address bar<br>
     <b>4.</b> Paste it below and click Connect
   </div>
-  <a class="auth-link" href="{auth_url}" target="_blank" rel="noopener">Sign in with Google</a>
+  <a class="auth-link" href="{auth_url}" target="_blank" rel="noopener">Sign in</a>
   <div class="divider"></div>
-  <form method="POST" action="http://{host}/api/mcp/oauth/exchange/{server_id}">
+  <form method="POST" action="/api/mcp/oauth/exchange/{server_id}">
     <p>Paste the URL from your browser after signing in:</p>
-    <input type="text" name="callback_url" placeholder="http://localhost:7000/api/mcp/oauth/callback?code=..." required>
+    <input type="text" name="callback_url" placeholder="http://localhost:7860/api/mcp/oauth/callback?code=..." required>
     <br><button type="submit">Connect</button>
   </form>
 </div></body></html>"""

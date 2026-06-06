@@ -114,8 +114,10 @@ def _set_enabled(server_id: str, enabled: bool, args):
 def cmd_add(args):
     if args.transport == "stdio" and not args.command:
         fail("--command is required for stdio transport")
-    if args.transport == "sse" and not args.url:
-        fail("--url is required for sse transport")
+    if args.transport in {"http", "streamable-http", "streamable_http"}:
+        args.transport = "streamable_http"
+    if args.transport in {"sse", "streamable_http"} and not args.url:
+        fail("--url is required for remote MCP transport")
     try:
         args_arr = json.loads(args.args) if args.args else []
         if not isinstance(args_arr, list):
@@ -187,7 +189,7 @@ def _build_parser():
 
     pa = sub.add_parser("add", parents=[common])
     pa.add_argument("--name", required=True)
-    pa.add_argument("--transport", choices=["stdio", "sse"], default="stdio")
+    pa.add_argument("--transport", choices=["stdio", "sse", "http", "streamable-http", "streamable_http"], default="stdio")
     pa.add_argument("--command", help="stdio: executable to run")
     pa.add_argument("--args", help="JSON array of args, e.g. '[\"--root\",\"/tmp\"]'")
     pa.add_argument("--env", help="JSON object of env vars, e.g. '{\"KEY\":\"value\"}'")

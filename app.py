@@ -168,6 +168,7 @@ if AUTH_ENABLED:
         "/api/auth/features",
         "/api/auth/settings",
         "/api/auth/integrations/presets",
+        "/api/mcp/oauth/callback",
         "/api/health",
         "/api/version",
         "/login",

@@ -4257,7 +4257,7 @@ async function initUnifiedIntegrations() {
           <h2 style="font-size:13px">Add MCP Server</h2>
           <div class="settings-col">
             <div class="settings-row"><label class="settings-label">Name</label><input id="uf-mcp-name" class="settings-input" placeholder="Server name"></div>
-            <div class="settings-row"><label class="settings-label">Transport</label><select id="uf-mcp-transport" class="settings-input"><option value="stdio">stdio</option><option value="sse">SSE</option></select></div>
+            <div class="settings-row"><label class="settings-label">Transport</label><select id="uf-mcp-transport" class="settings-input"><option value="stdio">stdio</option><option value="streamable_http">HTTP</option><option value="sse">SSE</option></select></div>
             <div id="uf-mcp-stdio-fields" style="display:flex;flex-direction:column;gap:6px;">
               <div class="settings-row"><label class="settings-label">Command</label><input id="uf-mcp-cmd" class="settings-input" placeholder="npx"></div>
               <div class="settings-row"><label class="settings-label">Args</label><input id="uf-mcp-args" class="settings-input" placeholder='["-y", "@modelcontextprotocol/server-filesystem"]'></div>
@@ -4270,9 +4270,9 @@ async function initUnifiedIntegrations() {
           </div>
         </div>`;
       el('uf-mcp-transport').addEventListener('change', () => {
-        const sse = el('uf-mcp-transport').value === 'sse';
-        el('uf-mcp-stdio-fields').style.display = sse ? 'none' : 'flex';
-        el('uf-mcp-sse-fields').style.display = sse ? 'flex' : 'none';
+        const remote = el('uf-mcp-transport').value === 'sse' || el('uf-mcp-transport').value === 'streamable_http';
+        el('uf-mcp-stdio-fields').style.display = remote ? 'none' : 'flex';
+        el('uf-mcp-sse-fields').style.display = remote ? 'flex' : 'none';
       });
       el('uf-mcp-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
       el('uf-mcp-save').addEventListener('click', async () => {

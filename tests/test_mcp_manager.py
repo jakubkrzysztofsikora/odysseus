@@ -1,4 +1,4 @@
-from src.mcp_manager import _format_mcp_connection_error
+from src.mcp_manager import McpManager, _format_mcp_connection_error, normalize_mcp_transport
 
 
 def test_playwright_mcp_connection_error_includes_install_hint():
@@ -24,3 +24,14 @@ def test_generic_mcp_connection_error_preserves_original_error():
     )
 
     assert msg == "boom"
+
+
+def test_remote_http_transport_aliases_normalize_to_streamable_http():
+    assert normalize_mcp_transport("http") == "streamable_http"
+    assert normalize_mcp_transport("streamable-http") == "streamable_http"
+    assert normalize_mcp_transport("streamable_http") == "streamable_http"
+    assert normalize_mcp_transport("sse") == "sse"
+
+
+def test_streamable_http_connector_is_implemented():
+    assert hasattr(McpManager, "_connect_streamable_http")

@@ -406,6 +406,12 @@ npx -y @playwright/mcp@latest --version
 
 That installs `@playwright/mcp` plus Playwright (~300MB total). Restart Odysseus and the server will register at startup.
 
+### Remote MCP servers
+
+For hosted MCP servers, use the `HTTP` transport in Settings. This maps to the MCP Streamable HTTP transport; legacy `SSE` is only for older servers that have not migrated. If a remote server advertises OAuth with a `WWW-Authenticate: Bearer ...` response, Odysseus stores an MCP OAuth config, shows the server as `Needs authorization`, and exposes an `Authorize` action instead of retrying a disconnected session.
+
+The OAuth callback endpoint is `/api/mcp/oauth/callback`. If the provider redirects to a localhost URL that your browser cannot complete, copy the full callback URL from the browser address bar and paste it into the Odysseus authorization page.
+
 ## Architecture
 ```
 app.py                   # FastAPI entry point

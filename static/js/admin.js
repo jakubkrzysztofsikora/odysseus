@@ -1561,10 +1561,10 @@ function initMcpForm() {
   }
 
   transportSel.addEventListener('change', () => {
-    const isSse = transportSel.value === 'sse';
-    sseRow.style.display = isSse ? '' : 'none';
-    cmdRow.style.display = isSse ? 'none' : '';
-    if (isSse) { _clearEnvFields(); helpBox.style.display = 'none'; }
+    const isRemote = transportSel.value === 'sse' || transportSel.value === 'streamable_http';
+    sseRow.style.display = isRemote ? '' : 'none';
+    cmdRow.style.display = isRemote ? 'none' : '';
+    if (isRemote) { _clearEnvFields(); helpBox.style.display = 'none'; }
   });
 
   // Preset catalog
@@ -1606,7 +1606,7 @@ function initMcpForm() {
     const msg = el('adm-mcpMsg');
     if (!name) { msg.textContent = 'Name is required'; msg.className = 'admin-error'; return; }
     if (transport === 'stdio' && !command) { msg.textContent = 'Command is required for stdio'; msg.className = 'admin-error'; return; }
-    if (transport === 'sse' && !url) { msg.textContent = 'URL is required for SSE'; msg.className = 'admin-error'; return; }
+    if ((transport === 'sse' || transport === 'streamable_http') && !url) { msg.textContent = 'URL is required for remote MCP'; msg.className = 'admin-error'; return; }
     try { JSON.parse(env); } catch { msg.textContent = 'Env must be valid JSON'; msg.className = 'admin-error'; return; }
     const fd = new FormData();
     fd.append('name', name); fd.append('transport', transport); fd.append('command', command); fd.append('args', args); fd.append('env', env); fd.append('url', url);
@@ -1629,7 +1629,7 @@ function initMcpForm() {
       const res = await fetch('/api/mcp/servers', { method: 'POST', body: fd, credentials: 'same-origin' });
       const data = await res.json();
       if (data.needs_oauth) {
-        msg.innerHTML = `Added ${esc(name)} — <a href="/api/mcp/oauth/authorize/${data.id}" target="_blank" style="color:var(--red);font-weight:600;">Authorize with Google</a> to connect`;
+        msg.innerHTML = `Added ${esc(name)} — <a href="/api/mcp/oauth/authorize/${data.id}" target="_blank" style="color:var(--red);font-weight:600;">Authorize</a> to connect`;
         msg.className = 'admin-success';
       } else if (data.connected) {
         msg.textContent = `Added ${name} (${data.tool_count} tools discovered)`; msg.className = 'admin-success';
