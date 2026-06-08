@@ -163,7 +163,11 @@ KNOWN_CONTEXT_WINDOWS = {
 _context_cache: Dict[str, int] = {}
 
 
-def get_context_length(endpoint_url: str, model: str) -> int:
+def get_context_length(
+    endpoint_url: str,
+    model: str,
+    headers: Optional[Dict[str, str]] = None,
+) -> int:
     """Get the context window size for a model.
 
     Queries /v1/models on the endpoint and looks for context_length
@@ -174,7 +178,7 @@ def get_context_length(endpoint_url: str, model: str) -> int:
     if not is_local and model in _context_cache:
         return _context_cache[model]
 
-    ctx = _query_context_length(endpoint_url, model)
+    ctx = _query_context_length(endpoint_url, model, headers=headers)
     # Only cache non-default values to allow retry on next request.
     # Local endpoints can restart with a different --max-model-len while keeping
     # the same model id, so always re-query them instead of serving stale cache.
@@ -203,7 +207,11 @@ def _lookup_known(model: str) -> Optional[int]:
     return best_ctx
 
 
-def _query_context_length(endpoint_url: str, model: str) -> int:
+def _query_context_length(
+    endpoint_url: str,
+    model: str,
+    headers: Optional[Dict[str, str]] = None,
+) -> int:
     """Query the model API for context length."""
     known = _lookup_known(model)
     api_ctx = None
@@ -212,7 +220,7 @@ def _query_context_length(endpoint_url: str, model: str) -> int:
     if _is_local_endpoint(endpoint_url):
         try:
             base = endpoint_url.split("/v1")[0] if "/v1" in endpoint_url else endpoint_url.rsplit("/", 1)[0]
-            r = httpx.get(f"{base}/slots", timeout=REQUEST_TIMEOUT)
+            r = httpx.get(f"{base}/slots", headers=headers or {}, timeout=REQUEST_TIMEOUT)
             if r.is_success:
                 slots = r.json()
                 if isinstance(slots, list) and slots:
@@ -225,7 +233,7 @@ def _query_context_length(endpoint_url: str, model: str) -> int:
 
     models_url = endpoint_url.replace("/chat/completions", "/models")
     try:
-        r = httpx.get(models_url, timeout=REQUEST_TIMEOUT)
+        r = httpx.get(models_url, headers=headers or {}, timeout=REQUEST_TIMEOUT)
         if r.is_success:
             data = r.json()
             models_list = data.get("data") or []

@@ -130,7 +130,7 @@ class TestGetContextLength:
     def test_local_endpoint_requeries_same_model_after_restart(self, monkeypatch):
         calls = []
 
-        def fake_query(endpoint_url, model):
+        def fake_query(endpoint_url, model, headers=None):
             calls.append((endpoint_url, model))
             return 8192 if len(calls) == 1 else 27000
 
@@ -149,7 +149,7 @@ class TestGetContextLength:
     def test_remote_endpoint_keeps_cached_context(self, monkeypatch):
         calls = []
 
-        def fake_query(endpoint_url, model):
+        def fake_query(endpoint_url, model, headers=None):
             calls.append((endpoint_url, model))
             return 200000 if len(calls) == 1 else 12345
 
@@ -164,3 +164,36 @@ class TestGetContextLength:
         assert first == 200000
         assert second == 200000
         assert len(calls) == 1
+
+    def test_models_probe_uses_endpoint_headers(self, monkeypatch):
+        seen = {}
+
+        class Response:
+            is_success = True
+
+            def json(self):
+                return {
+                    "data": [
+                        {
+                            "id": "mistral",
+                            "context_length": 64000,
+                        }
+                    ]
+                }
+
+        def fake_get(url, **kwargs):
+            seen["url"] = url
+            seen["headers"] = kwargs.get("headers")
+            return Response()
+
+        monkeypatch.setattr(model_context.httpx, "get", fake_get)
+
+        assert model_context.get_context_length(
+            "https://llm.example/v1/chat/completions",
+            "mistral",
+            headers={"Authorization": "Bearer test"},
+        ) == 64000
+        assert seen == {
+            "url": "https://llm.example/v1/models",
+            "headers": {"Authorization": "Bearer test"},
+        }

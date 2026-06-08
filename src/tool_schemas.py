@@ -31,8 +31,10 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "command": {"type": "string", "description": "The shell command to execute"}
                 },
-                "required": ["command"]
-            }
+                "required": ["command"],
+                "additionalProperties": False
+            },
+            "strict": True
         }
     },
     {
@@ -45,8 +47,10 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "code": {"type": "string", "description": "Python code to execute"}
                 },
-                "required": ["code"]
-            }
+                "required": ["code"],
+                "additionalProperties": False
+            },
+            "strict": True
         }
     },
     {
@@ -74,8 +78,10 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "url": {"type": "string", "description": "The URL or domain to fetch (http/https; a bare domain like example.com is fine)"}
                 },
-                "required": ["url"]
-            }
+                "required": ["url"],
+                "additionalProperties": False
+            },
+            "strict": True
         }
     },
     {
@@ -88,8 +94,10 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "path": {"type": "string", "description": "File path to read"}
                 },
-                "required": ["path"]
-            }
+                "required": ["path"],
+                "additionalProperties": False
+            },
+            "strict": True
         }
     },
     {
@@ -103,8 +111,10 @@ FUNCTION_TOOL_SCHEMAS = [
                     "path": {"type": "string", "description": "File path to write to"},
                     "content": {"type": "string", "description": "File content to write"}
                 },
-                "required": ["path", "content"]
-            }
+                "required": ["path", "content"],
+                "additionalProperties": False
+            },
+            "strict": True
         }
     },
     {
@@ -1075,17 +1085,31 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         return None
 
     # Some models emit valid JSON that isn't an object (e.g. a bare array
-    # ["ls -la"], string, or number) as the function arguments. Every branch
-    # below assumes a dict and calls args.get(...), so a non-dict would raise
-    # AttributeError and abort the whole agent stream. Coerce to {} instead.
+    # ["ls -la"], string, or number) as the function arguments. Treat useful
+    # scalar/list values as the likely primary argument instead of turning them
+    # into empty tool calls.
+    scalar_arg = None
+    if isinstance(args, str):
+        scalar_arg = args
+    elif isinstance(args, list) and args:
+        scalar_arg = args[0]
     if not isinstance(args, dict):
-        logger.warning(f"Non-object function call arguments for {name}: {args!r}; treating as empty")
+        logger.warning(f"Non-object function call arguments for {name}: {args!r}; treating as scalar")
         args = {}
 
     tool_type = _TOOL_NAME_MAP.get(name, name)
 
     # Allow MCP tools through (namespaced as mcp__serverid__toolname)
     if tool_type.startswith("mcp__"):
+        if not args and scalar_arg is not None:
+            try:
+                from src import agent_tools
+
+                mcp = agent_tools.get_mcp_manager()
+                if mcp and hasattr(mcp, "coerce_tool_arguments"):
+                    args = mcp.coerce_tool_arguments(tool_type, args, scalar_arg=scalar_arg)
+            except Exception as e:
+                logger.debug("MCP scalar argument coercion failed for %s: %s", tool_type, e)
         content = json.dumps(args) if args else "{}"
         return ToolBlock(tool_type, content)
     # Email tools are implemented as MCP — route them to email
@@ -1099,9 +1123,24 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
 
     # Convert structured args back to the text format each tool expects
     if tool_type == "bash":
-        content = args.get("command", "")
+        content = (
+            args.get("command")
+            or args.get("cmd")
+            or args.get("shell_command")
+            or args.get("script")
+            or args.get("code")
+            or args.get("input")
+            or scalar_arg
+            or ""
+        )
     elif tool_type == "python":
-        content = args.get("code", "")
+        content = (
+            args.get("code")
+            or args.get("script")
+            or args.get("input")
+            or scalar_arg
+            or ""
+        )
     elif tool_type == "web_search":
         queries = args.get("queries")
         if isinstance(queries, list) and queries:
@@ -1109,9 +1148,16 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         elif queries:
             content = str(queries)
         else:
-            content = args.get("query", "")
+            content = args.get("query") or args.get("q") or scalar_arg or ""
     elif tool_type == "read_file":
-        content = args.get("path", "")
+        content = (
+            args.get("path")
+            or args.get("file_path")
+            or args.get("filepath")
+            or args.get("filename")
+            or scalar_arg
+            or ""
+        )
     elif tool_type == "write_file":
         content = args.get("path", "") + "\n" + args.get("content", "")
     elif tool_type == "create_document":

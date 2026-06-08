@@ -55,6 +55,55 @@ def test_no_fallback_event_when_primary_succeeds(monkeypatch):
     assert not any('"fallback"' in c for c in chunks)
 
 
+def test_empty_primary_stream_falls_back(monkeypatch):
+    def per_model(model):
+        if model == "primary":
+            return [
+                'data: {"type": "usage", "data": {"input_tokens": 10, "output_tokens": 0}}\n\n',
+                "data: [DONE]\n\n",
+            ]
+        return ['data: {"delta": "hello"}\n\n', "data: [DONE]\n\n"]
+
+    chunks = _run_fallback(monkeypatch, per_model)
+    fb = [json.loads(c[6:]) for c in chunks if c.startswith("data: ") and '"fallback"' in c]
+    assert fb, f"no fallback event in {chunks}"
+    assert fb[0]["answered_by"] == "backup"
+    assert "empty stream" in fb[0]["reason"]
+    assert any('"delta": "hello"' in c for c in chunks)
+    assert not any('"output_tokens": 0' in c for c in chunks)
+
+
+def test_final_empty_stream_surfaces_error(monkeypatch):
+    async def fake_stream(url, model, messages, **kw):
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(llm_core, "stream_llm", fake_stream)
+
+    async def run():
+        out = []
+        async for c in llm_core.stream_llm_with_fallback(
+            [("u1", "primary", {})], [{"role": "user", "content": "hi"}]
+        ):
+            out.append(c)
+        return out
+
+    chunks = asyncio.run(run())
+    assert any(c.startswith("event: error") and "empty stream" in c for c in chunks)
+
+
+def test_usage_after_real_output_is_preserved(monkeypatch):
+    def per_model(model):
+        return [
+            'data: {"delta": "ok"}\n\n',
+            'data: {"type": "usage", "data": {"input_tokens": 10, "output_tokens": 1}}\n\n',
+            "data: [DONE]\n\n",
+        ]
+
+    chunks = _run_fallback(monkeypatch, per_model)
+    assert not any('"fallback"' in c for c in chunks)
+    assert any('"output_tokens": 1' in c for c in chunks)
+
+
 def test_dedupe_candidates_keeps_first_of_each_route():
     """(url, model) is the route key; later repeats are dropped, order preserved,
     the first tuple (with its headers) kept, malformed entries filtered."""

@@ -508,7 +508,7 @@ def setup_history_routes(session_manager) -> APIRouter:
             if len(session.history) < 6:
                 return {"status": "ok", "message": "Not enough messages to compact"}
 
-            ctx_len = get_context_length(session.endpoint_url, session.model)
+            ctx_len = get_context_length(session.endpoint_url, session.model, headers=session.headers)
             messages_before = session.get_context_messages()
             used_before = estimate_tokens(messages_before)
             pct_before = round((used_before / ctx_len) * 100, 1) if ctx_len else 0

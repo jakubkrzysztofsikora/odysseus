@@ -16,12 +16,11 @@ for mod in [
 
 import pytest
 import src.agent_tools  # noqa: F401
-from src.tool_schemas import function_call_to_tool_block
+from src.tool_schemas import FUNCTION_TOOL_SCHEMAS, function_call_to_tool_block
+from src.mcp_manager import McpManager
 
 
 @pytest.mark.parametrize("arguments", [
-    '["ls -la"]',   # JSON array
-    '"ls -la"',     # bare JSON string
     '42',            # JSON number
     'true',          # JSON bool
     'null',          # JSON null
@@ -35,3 +34,59 @@ def test_non_object_arguments_do_not_crash(arguments):
     assert block is not None
     assert block.tool_type == "bash"
     assert block.content == ""
+
+
+@pytest.mark.parametrize("arguments", [
+    '["ls -la"]',   # JSON array
+    '"ls -la"',     # bare JSON string
+])
+def test_scalar_arguments_become_primary_tool_argument(arguments):
+    block = function_call_to_tool_block("bash", arguments)
+    assert block is not None
+    assert block.tool_type == "bash"
+    assert block.content == "ls -la"
+
+
+def test_bash_accepts_common_command_aliases():
+    for key in ("cmd", "shell_command", "script", "code", "input"):
+        block = function_call_to_tool_block("bash", f'{{"{key}": "echo ok"}}')
+        assert block is not None
+        assert block.tool_type == "bash"
+        assert block.content == "echo ok"
+
+
+def test_scalar_mcp_arguments_become_single_required_argument():
+    mgr = McpManager()
+    mgr._tools["remote"] = [
+        {
+            "name": "search",
+            "description": "Search Atlassian",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        }
+    ]
+
+    src.agent_tools.set_mcp_manager(mgr)
+    try:
+        block = function_call_to_tool_block("mcp__remote__search", '"circit ai"')
+    finally:
+        src.agent_tools.set_mcp_manager(None)
+
+    assert block is not None
+    assert block.tool_type == "mcp__remote__search"
+    assert block.content == '{"query": "circit ai"}'
+
+
+@pytest.mark.parametrize("tool_name", ["bash", "python", "read_file", "write_file", "web_fetch"])
+def test_execution_tool_schemas_are_strict(tool_name):
+    schema = next(
+        item["function"]
+        for item in FUNCTION_TOOL_SCHEMAS
+        if item.get("function", {}).get("name") == tool_name
+    )
+
+    assert schema["strict"] is True
+    assert schema["parameters"]["additionalProperties"] is False

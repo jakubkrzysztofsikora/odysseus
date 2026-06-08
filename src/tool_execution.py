@@ -788,6 +788,18 @@ async def execute_tool_block(
             logger.info(f"Tool executed: {desc} -> bg job {rec['id']}")
             return desc, result
 
+    if tool in {"bash", "python", "read_file", "web_search", "web_fetch"} and not content.strip():
+        desc = f"{tool}: EMPTY"
+        result = {
+            "error": (
+                f"Tool '{tool}' was called with empty arguments. "
+                "Retry with the required argument field populated."
+            ),
+            "exit_code": 2,
+        }
+        logger.warning("Tool called with empty arguments: %s", tool)
+        return desc, result
+
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.

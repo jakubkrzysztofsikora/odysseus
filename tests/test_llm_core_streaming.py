@@ -38,16 +38,25 @@ class _FakeStreamCtx:
 
 
 class _FakeClient:
-    def __init__(self, lines):
+    def __init__(self, lines, calls=None):
         self._lines = lines
+        self.calls = calls
 
     def stream(self, method, url, **kw):
+        if self.calls is not None:
+            self.calls.append({"method": method, "url": url, **kw})
         return _FakeStreamCtx(self._lines)
 
 
-def _drive(monkeypatch, lines, model="gemini-3.1-pro-preview-customtools"):
+def _drive(
+    monkeypatch,
+    lines,
+    model="gemini-3.1-pro-preview-customtools",
+    url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    calls=None,
+):
     """Run stream_llm against a canned SSE line list; return parsed events."""
-    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _FakeClient(lines))
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _FakeClient(lines, calls))
     monkeypatch.setattr(llm_core, "_is_host_dead", lambda u: False)
     monkeypatch.setattr(llm_core, "note_model_activity", lambda *a, **k: None)
     monkeypatch.setattr(llm_core, "_clear_host_dead", lambda *a, **k: None)
@@ -55,7 +64,7 @@ def _drive(monkeypatch, lines, model="gemini-3.1-pro-preview-customtools"):
     async def run():
         events = []
         async for chunk in llm_core.stream_llm(
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            url,
             model,
             [{"role": "user", "content": "hi"}],
             headers={"Authorization": "Bearer k"},
@@ -106,6 +115,30 @@ def test_parallel_calls_with_null_index_do_not_collide(monkeypatch):
     assert "extra_content" not in by_name["bash"]
 
 
+def test_litellm_tool_requests_disable_parallel_tool_calls(monkeypatch):
+    calls = []
+
+    _drive(
+        monkeypatch,
+        ["data: [DONE]"],
+        model="chatgpt/gpt-5.5",
+        url="http://litellm.tail5d39b4.ts.net:4000/v1/chat/completions",
+        calls=calls,
+    )
+
+    payload = calls[0]["json"]
+    assert payload["tools"]
+    assert payload["parallel_tool_calls"] is False
+
+
+def test_provider_unknown_parallel_tool_param_is_not_forced(monkeypatch):
+    calls = []
+
+    _drive(monkeypatch, ["data: [DONE]"], calls=calls)
+
+    assert "parallel_tool_calls" not in calls[0]["json"]
+
+
 def test_single_call_chunked_arguments_still_accumulate(monkeypatch):
     # Conformant OpenAI style: index present, arguments streamed in pieces.
     lines = [
@@ -134,6 +167,25 @@ def test_null_index_chunked_arguments_attach_to_last_call(monkeypatch):
     calls = next(e["calls"] for e in events if e.get("type") == "tool_calls")
     assert len(calls) == 1, f"continuation opened a spurious call: {calls}"
     assert calls[0]["arguments"] == '{"q":"dogs"}'
+
+
+def test_concatenated_openai_json_objects_in_one_data_line(monkeypatch):
+    # LiteLLM can forward multiple upstream chunks as `data: {...}{...}` on a
+    # single SSE line. Each JSON object must be processed independently.
+    payloads = [
+        {"choices": [{"delta": {"reasoning_content": "We"}}]},
+        {"choices": [{"delta": {"reasoning_content": " think"}}]},
+        {"choices": [{"delta": {"content": "Answer"}}]},
+    ]
+    lines = [
+        "data: " + "".join(json.dumps(p) for p in payloads),
+        "data: [DONE]",
+    ]
+    events = _drive(monkeypatch, lines, model="deepseek-v4-pro")
+    thinking = "".join(e["delta"] for e in events if e.get("thinking"))
+    content = "".join(e["delta"] for e in events if "delta" in e and not e.get("thinking"))
+    assert thinking == "We think"
+    assert content == "Answer"
 
 
 def test_sparse_integer_indices_then_null_do_not_collide(monkeypatch):

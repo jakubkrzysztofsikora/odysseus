@@ -233,6 +233,7 @@ class SkillsManager:
             d["audit_teacher_model"] = u.get("audit_teacher_model")
             d["audited_at"] = u.get("audited_at")
             d["necessity"] = u.get("necessity")
+            d["source_available"] = True
             out.append(d)
             seen_names.add(sk.name)
         # Legacy JSON entries — surfaced as draft, not editable from new flow
@@ -269,6 +270,7 @@ class SkillsManager:
                             "steps": row.get("steps") or [],
                             "uses": row.get("uses", 0),
                             "last_used": row.get("last_used"),
+                            "source_available": False,
                             "_legacy": True,
                         })
             except Exception:

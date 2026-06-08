@@ -243,6 +243,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         skip_validation: str = Form(None),
         api_key: str = Form(""),
         endpoint_id: str = Form(""),
+        important: str = Form(None),
     ):
         skip_val = str(skip_validation).lower() == "true"
         user = get_current_user(request)
@@ -329,6 +330,16 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             rag=str(rag).lower() == "true" if rag else False,
             owner=user,
         )
+        if str(important).lower() == "true":
+            session.is_important = True
+            db = SessionLocal()
+            try:
+                db_session = db.query(DbSession).filter(DbSession.id == sid).first()
+                if db_session:
+                    db_session.is_important = True
+                    db.commit()
+            finally:
+                db.close()
         # Set auth headers for custom API-key endpoints
         resolved_key = request_api_key
         resolved_base = endpoint_url
@@ -1178,7 +1189,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             return {"context_length": None}
         try:
             from src.model_context import get_context_length
-            ctx = get_context_length(session.endpoint_url, session.model)
+            ctx = get_context_length(session.endpoint_url, session.model, headers=session.headers)
             return {"context_length": ctx, "model": session.model}
         except Exception:
             return {"context_length": None}

@@ -179,6 +179,29 @@ def test_update_skill_scalar_keys_exclude_owner():
     )
 
 
+def test_load_all_marks_disk_sources_available_and_legacy_unavailable(tmp_path):
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill_md(
+        skills_root,
+        category="general",
+        name="disk-skill",
+        owner="alice",
+        description="disk backed",
+    )
+    (tmp_path / "skills.json").write_text(
+        '[{"id":"legacy-one","title":"Legacy One","owner":"alice"}]',
+        encoding="utf-8",
+    )
+
+    sm = SkillsManager(str(tmp_path))
+    rows = {row["name"]: row for row in sm.load_all()}
+
+    assert rows["disk-skill"]["source_available"] is True
+    assert rows["legacy-one"]["source_available"] is False
+    assert rows["legacy-one"]["_legacy"] is True
+
+
 def test_read_skill_md_and_references_are_owner_scoped(tmp_path):
     """Two users own distinct skills with the same slug. read_skill_md()
     called with owner='alice' must return Alice's content, not Bob's.

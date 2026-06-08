@@ -15,6 +15,9 @@ let loaded = false;
 let _loadPromise = null;
 
 function esc(s) { return uiModule.esc(String(s ?? '')); }
+function _skillSourceAvailable(sk) {
+  return !(sk && (sk.source_available === false || sk._legacy === true));
+}
 
 let _pendingFocusSkill = null;
 let _cascadeNext = false;   // set true to play the domino-in entrance on the next render
@@ -32,9 +35,19 @@ function _playSkillsCascade(container = document.getElementById('skills-list')) 
 // fetch + content-settle jump). Populated lazily on expand AND eagerly in
 // the background for all visible cards right after render.
 const _mdCache = new Map();
+function _applySkillMarkdown(card, pre, md) {
+  if (pre) pre.textContent = md == null ? 'Source unavailable' : (md || '(empty)');
+  card._mdLoaded = true;
+  card._mdUnavailable = md == null;
+  card._md = md || '';
+}
 async function _fetchSkillMarkdown(name) {
   if (_mdCache.has(name)) return _mdCache.get(name);
   const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}/markdown`);
+  if (res.status === 404) {
+    _mdCache.set(name, null);
+    return null;
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   const md = data.markdown || '';
@@ -48,9 +61,9 @@ function _preloadVisibleMarkdown() {
     const name = card.dataset.skillName;
     if (!name || card._mdLoaded) return;
     const pre = card.querySelector('.skill-md-pre');
-    const apply = (md) => { if (pre) pre.textContent = md || '(empty)'; card._mdLoaded = true; card._md = md || ''; };
-    if (_mdCache.has(name)) { apply(_mdCache.get(name)); return; }
-    _fetchSkillMarkdown(name).then(apply).catch(() => {});
+    if (card.dataset.skillSourceAvailable === '0') { _applySkillMarkdown(card, pre, null); return; }
+    if (_mdCache.has(name)) { _applySkillMarkdown(card, pre, _mdCache.get(name)); return; }
+    _fetchSkillMarkdown(name).then((md) => _applySkillMarkdown(card, pre, md)).catch(() => {});
   });
 }
 
@@ -662,6 +675,7 @@ function renderSkillsList() {
     card.className = 'doclib-card skill-card';
     card.dataset.skillName = name;
     card.dataset.skillStatus = sk.status || 'draft';
+    card.dataset.skillSourceAvailable = _skillSourceAvailable(sk) ? '1' : '0';
 
     const checked = _selectedNames.has(name) ? 'checked' : '';
     const cbHtml = _selectMode
@@ -985,18 +999,15 @@ async function _expandSkillCard(card, name) {
   if (pre && !card._mdLoaded) {
     // Use the cache when available (the bg preload usually has it already),
     // so the content is in place synchronously — no async settle/jump.
-    if (_mdCache.has(name)) {
-      const md = _mdCache.get(name);
-      pre.textContent = md || '(empty)';
-      card._mdLoaded = true;
-      card._md = md || '';
+    if (card.dataset.skillSourceAvailable === '0') {
+      _applySkillMarkdown(card, pre, null);
+    } else if (_mdCache.has(name)) {
+      _applySkillMarkdown(card, pre, _mdCache.get(name));
     } else {
       pre.textContent = 'Loading…';
       try {
         const md = await _fetchSkillMarkdown(name);
-        pre.textContent = md || '(empty)';
-        card._mdLoaded = true;
-        card._md = md;
+        _applySkillMarkdown(card, pre, md);
       } catch (e) {
         pre.textContent = 'Failed to load SKILL.md';
       }
@@ -1013,6 +1024,10 @@ function _toggleSkillEdit(card, name) {
   if (existing) {
     // Already editing — treat Edit as Save.
     _saveSkillEdit(card, name);
+    return;
+  }
+  if (card._mdUnavailable || card.dataset.skillSourceAvailable === '0') {
+    uiModule.showError('SKILL.md source unavailable');
     return;
   }
   const pre = preview.querySelector('.skill-md-pre');

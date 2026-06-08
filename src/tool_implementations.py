@@ -20,6 +20,41 @@ def get_mcp_manager():
     return agent_tools.get_mcp_manager()
 
 
+def _mcp_oauth_token_needs_authorization(oauth_config: Optional[Dict[str, Any]]) -> bool:
+    if not oauth_config:
+        return False
+    token_file = os.path.expanduser(str(oauth_config.get("token_file") or ""))
+    if not token_file:
+        return False
+    if not os.path.exists(token_file):
+        return True
+    try:
+        from src.mcp_manager import _oauth_token_expired
+
+        return _oauth_token_expired(token_file)
+    except Exception:
+        return False
+
+
+def _mcp_remote_url(args: List[Any]) -> Optional[str]:
+    for item in args:
+        value = str(item)
+        if value.startswith(("http://", "https://")):
+            return value
+    return None
+
+
+def _mcp_remote_has_header(args: List[Any]) -> bool:
+    return any(str(item) in {"--header", "-H"} for item in args)
+
+
+def _is_interactive_mcp_remote(transport: str, command: Optional[str], args: List[Any]) -> bool:
+    if str(transport or "").lower() != "stdio":
+        return False
+    joined = " ".join([str(command or ""), *[str(a) for a in args]]).lower()
+    return "mcp-remote" in joined and not _mcp_remote_has_header(args)
+
+
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     if len(text) > limit:
         return text[:limit] + f"\n... (truncated, {len(text)} chars total)"
@@ -1218,14 +1253,36 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
                     _args = json.loads(srv.args) if srv.args else []
                     _env = json.loads(srv.env) if srv.env else {}
                     _oauth_config = json.loads(srv.oauth_config) if getattr(srv, "oauth_config", None) else None
+                    if _is_interactive_mcp_remote(srv.transport, srv.command, _args) and not _oauth_config:
+                        return {
+                            "error": f"OAuth authorization required for '{srv.name}'. Open Settings > MCP and click Authorize.",
+                            "needs_oauth": True,
+                            "exit_code": 1,
+                        }
+                    if _mcp_oauth_token_needs_authorization(_oauth_config):
+                        return {
+                            "error": f"OAuth authorization required for '{srv.name}'. Open Settings > MCP and click Authorize.",
+                            "needs_oauth": True,
+                            "exit_code": 1,
+                        }
+                    _transport = srv.transport
+                    _command = srv.command
+                    _url = srv.url
+                    if _oauth_config and _is_interactive_mcp_remote(srv.transport, srv.command, _args):
+                        remote_url = _mcp_remote_url(_args)
+                        if remote_url:
+                            _transport = "streamable_http"
+                            _command = None
+                            _args = []
+                            _url = remote_url
                     await mcp.connect_server(
                         server_id=sid,
                         name=srv.name,
-                        transport=srv.transport,
-                        command=srv.command,
+                        transport=_transport,
+                        command=_command,
                         args=_args,
                         env=_env,
-                        url=srv.url,
+                        url=_url,
                         oauth_config=_oauth_config,
                     )
                     st = mcp.get_server_status(sid)

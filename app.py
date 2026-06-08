@@ -646,6 +646,14 @@ app.include_router(setup_hwfit_routes())
 from routes.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))
 
+# Agentic workflows and public form sync
+from routes.workflow_routes import (
+    setup_workflow_routes,
+    start_workflow_background_runners,
+    stop_workflow_background_runners,
+)
+app.include_router(setup_workflow_routes())
+
 # User Preferences
 from routes.prefs_routes import setup_prefs_routes
 app.include_router(setup_prefs_routes())
@@ -753,6 +761,10 @@ async def serve_gallery(request: Request):
 
 @app.get("/tasks")
 async def serve_tasks(request: Request):
+    return await serve_index(request)
+
+@app.get("/workflows")
+async def serve_workflows(request: Request):
     return await serve_index(request)
 
 @app.get("/library")
@@ -1044,6 +1056,10 @@ async def _startup_event():
                 logger.warning(f"Nightly skill audit failed: {e}")
 
     _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
+    try:
+        start_workflow_background_runners()
+    except Exception as e:
+        logger.warning(f"Workflow runner startup failed: {e}")
     logger.info("Application startup complete")
 
 async def _shutdown_event():
@@ -1064,6 +1080,11 @@ async def _shutdown_event():
         await webhook_manager.close()
     except Exception as e:
         logger.warning(f"Webhook manager shutdown error: {e}")
+    # Stop public workflow pollers.
+    try:
+        await stop_workflow_background_runners()
+    except Exception as e:
+        logger.warning(f"Workflow runner shutdown error: {e}")
     # Disconnect all MCP servers
     try:
         await mcp_manager.disconnect_all()

@@ -14,7 +14,7 @@ import httpx
 
 from core.database import McpServer, SessionLocal
 from core.middleware import require_admin
-from src.mcp_manager import McpManager, normalize_mcp_transport
+from src.mcp_manager import McpManager, _oauth_token_expired, normalize_mcp_transport
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,13 @@ def _oauth_token_missing(oauth_cfg: dict | None) -> bool:
     return bool(token_file) and not os.path.exists(token_file)
 
 
+def _oauth_token_needs_authorization(oauth_cfg: dict | None) -> bool:
+    if not oauth_cfg:
+        return False
+    token_file = os.path.expanduser(oauth_cfg.get("token_file", ""))
+    return bool(token_file) and (not os.path.exists(token_file) or _oauth_token_expired(token_file))
+
+
 def _default_remote_mcp_oauth_config(server_id: str) -> dict:
     return {
         "provider": "mcp",
@@ -68,6 +75,49 @@ def _default_remote_mcp_oauth_config(server_id: str) -> dict:
 def _looks_like_remote_auth_error(error: str | None) -> bool:
     lower = (error or "").lower()
     return any(marker in lower for marker in ("401", "unauthorized", "authentication", "oauth"))
+
+
+def _mcp_remote_url(args: list) -> str | None:
+    for idx, arg in enumerate(args or []):
+        if arg == "mcp-remote" or str(arg).startswith("mcp-remote@"):
+            for candidate in args[idx + 1:]:
+                if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
+                    return candidate
+    return None
+
+
+def _mcp_remote_has_header(args: list) -> bool:
+    return any(arg == "--header" or str(arg).startswith("--header=") for arg in (args or []))
+
+
+def _is_interactive_mcp_remote(srv: McpServer, args: list) -> bool:
+    return (
+        normalize_mcp_transport(srv.transport) == "stdio"
+        and _mcp_remote_url(args) is not None
+        and not _mcp_remote_has_header(args)
+    )
+
+
+def _oauth_runtime_config(srv: McpServer, args: list, env: dict, oauth_cfg: dict | None) -> dict:
+    """Return a connect_server config, converting mcp-remote stdio to native remote OAuth."""
+    remote_url = _mcp_remote_url(args)
+    if oauth_cfg and _is_interactive_mcp_remote(srv, args) and remote_url:
+        return {
+            "transport": "streamable_http",
+            "command": None,
+            "args": [],
+            "env": env,
+            "url": remote_url,
+            "oauth_config": oauth_cfg,
+        }
+    return {
+        "transport": srv.transport,
+        "command": srv.command,
+        "args": args,
+        "env": env,
+        "url": srv.url,
+        "oauth_config": oauth_cfg,
+    }
 
 
 async def _remote_advertises_oauth(url: str | None) -> bool:
@@ -114,11 +164,15 @@ def setup_mcp_routes(mcp_manager: McpManager):
             result = []
             for srv in servers:
                 status = mcp_manager.get_server_status(srv.id)
+                args = json.loads(srv.args) if srv.args else []
+                env = json.loads(srv.env) if srv.env else {}
                 oauth_cfg = json.loads(srv.oauth_config) if srv.oauth_config else None
-                needs_oauth = False
-                if oauth_cfg:
-                    token_file = os.path.expanduser(oauth_cfg.get("token_file", ""))
-                    needs_oauth = token_file and not os.path.exists(token_file)
+                is_interactive_remote = _is_interactive_mcp_remote(srv, args)
+                needs_oauth = (
+                    status.get("status") == "needs_oauth"
+                    or _oauth_token_needs_authorization(oauth_cfg)
+                    or (is_interactive_remote and status.get("status") != "connected")
+                )
                 disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
                 total_tools = status.get("tool_count", 0)
                 result.append({
@@ -126,8 +180,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
                     "name": srv.name,
                     "transport": srv.transport,
                     "command": srv.command,
-                    "args": json.loads(srv.args) if srv.args else [],
-                    "env": json.loads(srv.env) if srv.env else {},
+                    "args": args,
+                    "env": env,
                     "url": srv.url,
                     "is_enabled": srv.is_enabled,
                     "status": status.get("status", "disconnected"),
@@ -135,7 +189,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
                     "disabled_tool_count": len(disabled_list),
                     "enabled_tool_count": max(0, total_tools - len(disabled_list)),
                     "error": status.get("error"),
-                    "has_oauth": oauth_cfg is not None,
+                    "has_oauth": oauth_cfg is not None or is_interactive_remote,
                     "needs_oauth": needs_oauth,
                 })
             return result
@@ -296,31 +350,58 @@ def setup_mcp_routes(mcp_manager: McpManager):
             await mcp_manager.disconnect_server(server_id)
 
             args, env, oauth_config = _server_runtime_config(srv)
-            if _oauth_token_missing(oauth_config):
+            if _is_interactive_mcp_remote(srv, args) and not oauth_config:
                 return {
                     "connected": False,
                     "status": "needs_oauth",
                     "tool_count": 0,
-                    "error": "OAuth authorization required",
+                    "error": "OAuth authorization required; use Authorize",
                     "needs_oauth": True,
                 }
-            connected = await mcp_manager.connect_server(
-                server_id=server_id,
-                name=srv.name,
-                transport=srv.transport,
-                command=srv.command,
-                args=args,
-                env=env,
-                url=srv.url,
-                oauth_config=oauth_config,
-            )
+            if _oauth_token_needs_authorization(oauth_config):
+                return {
+                    "connected": False,
+                    "status": "needs_oauth",
+                    "tool_count": 0,
+                    "error": "OAuth authorization required; use Authorize",
+                    "needs_oauth": True,
+                }
+            runtime = _oauth_runtime_config(srv, args, env, oauth_config)
+            try:
+                connected = await mcp_manager.connect_server(
+                    server_id=server_id,
+                    name=srv.name,
+                    **runtime,
+                )
+            except BaseException as e:
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    raise
+                logger.warning("MCP reconnect needs OAuth for %s: %s", server_id, e)
+                if oauth_config:
+                    return {
+                        "connected": False,
+                        "status": "needs_oauth",
+                        "tool_count": 0,
+                        "error": "OAuth authorization required; use Authorize",
+                        "needs_oauth": True,
+                    }
+                raise
 
             status = mcp_manager.get_server_status(server_id)
+            if oauth_config and not connected and _looks_like_remote_auth_error(status.get("error")):
+                return {
+                    "connected": False,
+                    "status": "needs_oauth",
+                    "tool_count": 0,
+                    "error": "OAuth authorization required; use Authorize",
+                    "needs_oauth": True,
+                }
             return {
                 "connected": connected,
                 "status": status.get("status", "disconnected"),
                 "tool_count": status.get("tool_count", 0),
                 "error": status.get("error"),
+                "needs_oauth": status.get("status") == "needs_oauth",
             }
         finally:
             db.close()
@@ -341,16 +422,14 @@ def setup_mcp_routes(mcp_manager: McpManager):
 
             if enabled:
                 args, env, oauth_config = _server_runtime_config(srv)
-                if not _oauth_token_missing(oauth_config):
+                if not _oauth_token_needs_authorization(oauth_config) and not (
+                    _is_interactive_mcp_remote(srv, args) and not oauth_config
+                ):
+                    runtime = _oauth_runtime_config(srv, args, env, oauth_config)
                     await mcp_manager.connect_server(
                         server_id=server_id,
                         name=srv.name,
-                        transport=srv.transport,
-                        command=srv.command,
-                        args=args,
-                        env=env,
-                        url=srv.url,
-                        oauth_config=oauth_config,
+                        **runtime,
                     )
             else:
                 await mcp_manager.disconnect_server(server_id)
@@ -440,6 +519,19 @@ def setup_mcp_routes(mcp_manager: McpManager):
             srv = db.query(McpServer).filter(McpServer.id == server_id).first()
             if not srv:
                 raise HTTPException(404, "Server not found")
+            args, _env, _oauth = _server_runtime_config(srv)
+            remote_url = _mcp_remote_url(args)
+            if _is_interactive_mcp_remote(srv, args) and remote_url:
+                if not srv.oauth_config:
+                    srv.oauth_config = json.dumps(_default_remote_mcp_oauth_config(srv.id))
+                # Normalize legacy mcp-remote proxy entries to native remote MCP
+                # so Odysseus can own callback state and token refresh.
+                srv.transport = "streamable_http"
+                srv.command = None
+                srv.args = "[]"
+                srv.url = remote_url
+                db.commit()
+                db.refresh(srv)
             if not srv.oauth_config:
                 raise HTTPException(400, "Server has no OAuth config")
 
@@ -514,6 +606,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
         oauth_for_connect = dict(oauth_cfg)
         oauth_for_connect["_redirect_handler"] = redirect_handler
         oauth_for_connect["_callback_handler"] = callback_handler
+        runtime = _oauth_runtime_config(srv, args, env, oauth_for_connect)
 
         async def run_connect():
             try:
@@ -521,12 +614,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 connected = await mcp_manager.connect_server(
                     server_id=srv.id,
                     name=srv.name,
-                    transport=srv.transport,
-                    command=srv.command,
-                    args=args,
-                    env=env,
-                    url=srv.url,
-                    oauth_config=oauth_for_connect,
+                    **runtime,
                 )
                 status = mcp_manager.get_server_status(srv.id)
                 result = {
@@ -547,7 +635,15 @@ def setup_mcp_routes(mcp_manager: McpManager):
         except asyncio.TimeoutError:
             error = "The MCP server did not provide an OAuth authorization URL. Check the server URL and transport."
             if flow["result"].done():
-                error = flow["result"].result().get("error") or error
+                result = flow["result"].result()
+                _PENDING_MCP_OAUTH.pop(flow_id, None)
+                if result.get("connected"):
+                    return HTMLResponse(_oauth_result_page(
+                        "Authorization Successful",
+                        f"{srv.name} connected with {result.get('tool_count', 0)} tools. You can close this window.",
+                        success=True,
+                    ))
+                error = result.get("error") or error
             _PENDING_MCP_OAUTH.pop(flow_id, None)
             return HTMLResponse(
                 _oauth_result_page(
@@ -675,15 +771,11 @@ def setup_mcp_routes(mcp_manager: McpManager):
 
             # Attempt to connect the MCP server now
             args, env, oauth_config = _server_runtime_config(srv)
+            runtime = _oauth_runtime_config(srv, args, env, oauth_config)
             connected = await mcp_manager.connect_server(
                 server_id=server_id,
                 name=srv.name,
-                transport=srv.transport,
-                command=srv.command,
-                args=args,
-                env=env,
-                url=srv.url,
-                oauth_config=oauth_config,
+                **runtime,
             )
 
             if connected:

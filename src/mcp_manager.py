@@ -5,9 +5,12 @@ Manages connections to MCP (Model Context Protocol) tool servers.
 Each server exposes tools that are made available to the agent loop.
 """
 
+import asyncio
+import copy
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,36 @@ def normalize_mcp_transport(transport: str) -> str:
     if value in REMOTE_HTTP_TRANSPORTS:
         return "streamable_http"
     return value
+
+
+def _startup_mcp_remote_args(args: List[str], per_server_timeout: float) -> List[str]:
+    """Bound mcp-remote's interactive OAuth wait during app startup.
+
+    Normal manual reconnects keep the configured args untouched. Startup should
+    never hang all user MCP discovery behind a browser auth prompt.
+    """
+    if "--auth-timeout" in args:
+        return args
+    if not any(arg == "mcp-remote" or arg.startswith("mcp-remote@") for arg in args):
+        return args
+    auth_timeout = max(1, min(10, int(per_server_timeout) - 2))
+    return [*args, "--auth-timeout", str(auth_timeout)]
+
+
+def _is_mcp_remote_args(args: List[str]) -> bool:
+    return any(arg == "mcp-remote" or arg.startswith("mcp-remote@") for arg in args)
+
+
+def _has_mcp_remote_header(args: List[str]) -> bool:
+    return any(arg == "--header" or arg.startswith("--header=") for arg in args)
+
+
+def _skip_interactive_mcp_remote_startup(args: List[str], env: Dict[str, str]) -> bool:
+    """Whether startup should avoid launching an interactive mcp-remote OAuth flow."""
+    if not _is_mcp_remote_args(args) or _has_mcp_remote_header(args):
+        return False
+    override = str((env or {}).get("ODYSSEUS_MCP_AUTOSTART_INTERACTIVE", "")).lower()
+    return override not in {"1", "true", "yes", "on"}
 
 
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
@@ -41,6 +74,158 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
     return raw_error
 
 
+def _exception_text(error: BaseException) -> str:
+    message = str(error).strip()
+    if message:
+        return f"{type(error).__name__}: {message}"
+    return f"{type(error).__name__}: {error!r}"
+
+
+def _normalize_schema_for_openai(schema: Any) -> Dict[str, Any]:
+    """Return a conservative OpenAI-tool-safe copy of an MCP input schema."""
+    if not isinstance(schema, dict):
+        schema = {}
+    out = copy.deepcopy(schema)
+    if not isinstance(out, dict):
+        out = {}
+
+    if "properties" in out and "type" not in out:
+        out["type"] = "object"
+
+    schema_type = out.get("type")
+    type_values = set(schema_type if isinstance(schema_type, list) else [schema_type])
+    is_object = "object" in type_values or "properties" in out
+
+    if is_object:
+        props = out.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+        out["properties"] = {
+            str(name): _normalize_schema_for_openai(prop)
+            for name, prop in props.items()
+        }
+        required = out.get("required")
+        if not isinstance(required, list):
+            required = []
+        out["required"] = [
+            str(name)
+            for name in required
+            if str(name) in out["properties"]
+        ]
+        out["additionalProperties"] = False
+
+    items = out.get("items")
+    if isinstance(items, dict):
+        out["items"] = _normalize_schema_for_openai(items)
+    elif isinstance(items, list):
+        out["items"] = [
+            _normalize_schema_for_openai(item) if isinstance(item, dict) else item
+            for item in items
+        ]
+
+    for key in ("anyOf", "oneOf", "allOf"):
+        if isinstance(out.get(key), list):
+            out[key] = [
+                _normalize_schema_for_openai(item) if isinstance(item, dict) else item
+                for item in out[key]
+            ]
+
+    if not out:
+        out = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+    return out
+
+
+def _schema_is_strict_compatible(schema: Any) -> bool:
+    """Whether a schema can safely be sent with OpenAI `strict: true`."""
+    if not isinstance(schema, dict):
+        return True
+    schema_type = schema.get("type")
+    type_values = set(schema_type if isinstance(schema_type, list) else [schema_type])
+    is_object = "object" in type_values or "properties" in schema
+    if is_object:
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        if set(required) != set(props):
+            return False
+        if schema.get("additionalProperties") is not False:
+            return False
+        if not all(_schema_is_strict_compatible(prop) for prop in props.values()):
+            return False
+    items = schema.get("items")
+    if isinstance(items, dict) and not _schema_is_strict_compatible(items):
+        return False
+    if isinstance(items, list) and not all(
+        _schema_is_strict_compatible(item) for item in items if isinstance(item, dict)
+    ):
+        return False
+    for key in ("anyOf", "oneOf", "allOf"):
+        variants = schema.get(key)
+        if isinstance(variants, list) and not all(
+            _schema_is_strict_compatible(item) for item in variants if isinstance(item, dict)
+        ):
+            return False
+    return True
+
+
+def _blank_required_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
+def _example_for_schema(schema: Any) -> Any:
+    if not isinstance(schema, dict):
+        return "..."
+    schema_type = schema.get("type")
+    type_values = schema_type if isinstance(schema_type, list) else [schema_type]
+    type_values = [t for t in type_values if t != "null"]
+    primary = type_values[0] if type_values else None
+    if primary == "array":
+        return []
+    if primary == "object":
+        return {}
+    if primary == "integer":
+        return 0
+    if primary == "number":
+        return 0
+    if primary == "boolean":
+        return False
+    return "..."
+
+
+def _oauth_token_expired(token_file: str, skew_seconds: int = 60) -> bool:
+    """Best-effort expiry check for MCP OAuth token files.
+
+    The MCP SDK writes OAuthToken JSON that may include expires_in without an
+    absolute issued/expires timestamp. In that case use the token file mtime as
+    issued_at so app startup does not try an obviously stale token and trigger
+    an interactive OAuth flow with no redirect handler.
+    """
+    if not token_file or not os.path.exists(token_file):
+        return False
+    try:
+        with open(token_file) as f:
+            data = json.load(f)
+    except Exception:
+        return False
+
+    now = time.time()
+    expires_at = data.get("expires_at")
+    if isinstance(expires_at, (int, float)):
+        return expires_at <= now + skew_seconds
+
+    expires_in = data.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        issued_at = data.get("issued_at")
+        if not isinstance(issued_at, (int, float)):
+            issued_at = os.path.getmtime(token_file)
+        return issued_at + expires_in <= now + skew_seconds
+
+    return False
+
+
 class FileTokenStorage:
     """File-backed token storage implementing the MCP SDK TokenStorage protocol."""
 
@@ -57,8 +242,12 @@ class FileTokenStorage:
 
     async def set_tokens(self, tokens) -> None:
         os.makedirs(os.path.dirname(self._token_file), exist_ok=True)
+        data = tokens.model_dump(mode="json")
+        if data.get("expires_in") and not data.get("expires_at"):
+            data["issued_at"] = int(time.time())
+            data["expires_at"] = data["issued_at"] + int(data["expires_in"])
         with open(self._token_file, "w") as f:
-            json.dump(tokens.model_dump(mode="json"), f, indent=2)
+            json.dump(data, f, indent=2)
 
     async def get_client_info(self):
         from mcp.shared.auth import OAuthClientInformationFull
@@ -335,16 +524,27 @@ class McpManager:
         for sid in ids:
             await self.disconnect_server(sid)
 
-    async def connect_all_enabled(self):
+    async def connect_all_enabled(self, per_server_timeout: float = 12.0):
         """Connect to all enabled MCP servers from the database."""
         from src.database import McpServer, SessionLocal
 
         db = SessionLocal()
         try:
             servers = db.query(McpServer).filter(McpServer.is_enabled == True).all()
+            configs = []
             for srv in servers:
-                args = json.loads(srv.args) if srv.args else []
                 env = json.loads(srv.env) if srv.env else {}
+                args = json.loads(srv.args) if srv.args else []
+                if normalize_mcp_transport(srv.transport) == "stdio":
+                    if _skip_interactive_mcp_remote_startup(args, env):
+                        self._connections[srv.id] = {
+                            "status": "needs_oauth",
+                            "name": srv.name,
+                            "error": "Interactive OAuth required; reconnect from MCP settings",
+                        }
+                        self._generation += 1
+                        continue
+                    args = _startup_mcp_remote_args(args, per_server_timeout)
                 oauth_config = json.loads(srv.oauth_config) if srv.oauth_config else None
                 token_file = os.path.expanduser(oauth_config.get("token_file", "")) if oauth_config else ""
                 if token_file and not os.path.exists(token_file):
@@ -354,18 +554,88 @@ class McpManager:
                         "error": "OAuth authorization required",
                     }
                     continue
-                await self.connect_server(
-                    server_id=srv.id,
-                    name=srv.name,
-                    transport=srv.transport,
-                    command=srv.command,
-                    args=args,
-                    env=env,
-                    url=srv.url,
-                    oauth_config=oauth_config,
-                )
+                if token_file and _oauth_token_expired(token_file):
+                    self._connections[srv.id] = {
+                        "status": "needs_oauth",
+                        "name": srv.name,
+                        "error": "OAuth token expired; reconnect from MCP settings",
+                    }
+                    self._generation += 1
+                    continue
+                configs.append({
+                    "server_id": srv.id,
+                    "name": srv.name,
+                    "transport": srv.transport,
+                    "command": srv.command,
+                    "args": args,
+                    "env": env,
+                    "url": srv.url,
+                    "oauth_config": oauth_config,
+                })
         finally:
             db.close()
+
+        async def _connect_one(config: Dict[str, Any]) -> bool:
+            try:
+                return await asyncio.wait_for(
+                    self.connect_server(**config),
+                    timeout=per_server_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "MCP startup timed out for %s (%s) after %.1fs",
+                    config["name"],
+                    config["server_id"],
+                    per_server_timeout,
+                )
+                self._connections[config["server_id"]] = {
+                    "status": "error",
+                    "error": f"Connection timed out after {per_server_timeout:.1f}s",
+                    "name": config["name"],
+                }
+                self._generation += 1
+                return False
+            except Exception as e:
+                logger.error(
+                    "MCP startup failed for %s (%s): %s",
+                    config["name"],
+                    config["server_id"],
+                    e,
+                )
+                self._connections[config["server_id"]] = {
+                    "status": "error",
+                    "error": str(e),
+                    "name": config["name"],
+                }
+                self._generation += 1
+                return False
+            except BaseException as e:
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    raise
+                err_text = _exception_text(e)
+                status = "needs_oauth" if config.get("oauth_config") else "error"
+                error = (
+                    "OAuth authorization required; reconnect from MCP settings"
+                    if config.get("oauth_config")
+                    else err_text
+                )
+                logger.warning(
+                    "MCP startup aborted for %s (%s): %s",
+                    config["name"],
+                    config["server_id"],
+                    err_text,
+                )
+                self._connections[config["server_id"]] = {
+                    "status": status,
+                    "error": error,
+                    "name": config["name"],
+                }
+                self._generation += 1
+                return False
+
+        if not configs:
+            return []
+        return await asyncio.gather(*(_connect_one(config) for config in configs))
 
     async def call_tool(self, qualified_name: str, arguments: Dict) -> Dict:
         """Call an MCP tool by its qualified name (mcp__{server_id}__{tool_name}).
@@ -383,12 +653,35 @@ class McpManager:
         if not session:
             return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
 
+        arguments = self.coerce_tool_arguments(qualified_name, arguments)
+        missing = self.missing_required_arguments(qualified_name, arguments)
+        if missing:
+            example = self.required_argument_example(qualified_name, missing)
+            logger.warning(
+                "MCP tool called with missing required arguments: %s missing=%s args=%r",
+                qualified_name,
+                missing,
+                arguments,
+            )
+            return {
+                "error": (
+                    f"Tool '{qualified_name}' was called with empty or missing required "
+                    f"argument(s): {', '.join(missing)}. Retry with a JSON object like "
+                    f"{json.dumps(example)}. Do not say you are blocked until a correctly "
+                    "populated tool call has also failed."
+                ),
+                "exit_code": 2,
+                "empty_arguments": not bool(arguments),
+                "missing_required": missing,
+            }
+
         try:
             result = await self._do_call(session, tool_name, arguments)
         except Exception as e:
+            err_text = _exception_text(e)
             # Auto-reconnect for builtin servers whose subprocess may have died
             if self.is_builtin(server_id):
-                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
+                logger.warning("MCP call failed for %s, attempting reconnect: %s", qualified_name, err_text)
                 reconnected = await self._reconnect_builtin(server_id)
                 if reconnected:
                     session = self._sessions.get(server_id)
@@ -396,18 +689,97 @@ class McpManager:
                         try:
                             result = await self._do_call(session, tool_name, arguments)
                         except Exception as e2:
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
-                            return {"error": str(e2), "exit_code": 1}
+                            err2_text = _exception_text(e2)
+                            logger.error("MCP tool call failed after reconnect: %s: %s", qualified_name, err2_text)
+                            return {"error": err2_text, "exit_code": 1}
                     else:
                         return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
                 else:
                     logger.error(f"MCP reconnect failed for {server_id}")
                     return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
             else:
-                logger.error(f"MCP tool call failed: {qualified_name}: {e}")
-                return {"error": str(e), "exit_code": 1}
+                logger.warning("MCP call failed for %s, attempting reconnect: %s", qualified_name, err_text)
+                reconnected = await self._reconnect_configured_server(server_id)
+                if reconnected:
+                    session = self._sessions.get(server_id)
+                    if session:
+                        try:
+                            result = await self._do_call(session, tool_name, arguments)
+                        except Exception as e2:
+                            err2_text = _exception_text(e2)
+                            logger.error("MCP tool call failed after reconnect: %s: %s", qualified_name, err2_text)
+                            return {"error": err2_text, "exit_code": 1}
+                    else:
+                        return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
+                else:
+                    logger.error("MCP reconnect failed for %s after call error: %s", server_id, err_text)
+                    return {"error": f"{err_text}; reconnect failed for MCP server {server_id}", "exit_code": 1}
 
         return result
+
+    def _input_schema_for_tool(self, server_id: str, tool_name: str) -> Dict[str, Any]:
+        for tool in self._tools.get(server_id, []):
+            if tool.get("name") == tool_name:
+                schema = tool.get("input_schema") or {}
+                return schema if isinstance(schema, dict) else {}
+        return {}
+
+    def _split_qualified_tool_name(self, qualified_name: str) -> tuple[Optional[str], Optional[str]]:
+        parts = qualified_name.split("__", 2)
+        if len(parts) != 3 or parts[0] != "mcp":
+            return None, None
+        return parts[1], parts[2]
+
+    def coerce_tool_arguments(
+        self,
+        qualified_name: str,
+        arguments: Any,
+        *,
+        scalar_arg: Any = None,
+    ) -> Dict[str, Any]:
+        """Coerce model-emitted MCP args without dropping useful scalar values."""
+        args = arguments if isinstance(arguments, dict) else {}
+        if args or scalar_arg is None:
+            return args
+        server_id, tool_name = self._split_qualified_tool_name(qualified_name)
+        if not server_id or not tool_name:
+            return args
+        schema = self._input_schema_for_tool(server_id, tool_name)
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        if len(required) == 1:
+            return {str(required[0]): scalar_arg}
+        if len(props) == 1:
+            return {str(next(iter(props))): scalar_arg}
+        return args
+
+    def missing_required_arguments(self, qualified_name: str, arguments: Any) -> List[str]:
+        server_id, tool_name = self._split_qualified_tool_name(qualified_name)
+        if not server_id or not tool_name:
+            return []
+        schema = self._input_schema_for_tool(server_id, tool_name)
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        if not required:
+            return []
+        args = arguments if isinstance(arguments, dict) else {}
+        return [
+            str(name)
+            for name in required
+            if str(name) not in args or _blank_required_value(args.get(str(name)))
+        ]
+
+    def required_argument_example(self, qualified_name: str, names: Optional[List[str]] = None) -> Dict[str, Any]:
+        server_id, tool_name = self._split_qualified_tool_name(qualified_name)
+        if not server_id or not tool_name:
+            return {}
+        schema = self._input_schema_for_tool(server_id, tool_name)
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = names or schema.get("required") or []
+        return {
+            str(name): _example_for_schema(props.get(str(name), {}))
+            for name in required
+        }
 
     async def _do_call(self, session, tool_name: str, arguments: Dict) -> Dict:
         """Execute a single MCP tool call and return result dict."""
@@ -427,6 +799,8 @@ class McpManager:
 
         output = "\n".join(output_parts)
         is_error = getattr(result, 'isError', False)
+        if is_error and not output.strip():
+            output = "MCP tool returned an error with no content."
 
         result_dict = {
             "stdout": output if not is_error else "",
@@ -468,6 +842,57 @@ class McpManager:
             logger.error(f"Failed to reconnect builtin MCP server {name}: {e}")
             return False
 
+    async def _reconnect_configured_server(self, server_id: str) -> bool:
+        """Reconnect a database-configured MCP server after a call-time failure."""
+        from src.database import McpServer, SessionLocal
+
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+            if not srv or not srv.is_enabled:
+                self._connections[server_id] = {
+                    "status": "error",
+                    "error": "MCP server is not configured or disabled",
+                    "name": server_id,
+                }
+                self._generation += 1
+                return False
+
+            args = json.loads(srv.args) if srv.args else []
+            env = json.loads(srv.env) if srv.env else {}
+            oauth_config = json.loads(srv.oauth_config) if srv.oauth_config else None
+            token_file = os.path.expanduser(oauth_config.get("token_file", "")) if oauth_config else ""
+            if token_file and not os.path.exists(token_file):
+                self._connections[server_id] = {
+                    "status": "needs_oauth",
+                    "name": srv.name,
+                    "error": "OAuth authorization required",
+                }
+                self._generation += 1
+                return False
+            if token_file and _oauth_token_expired(token_file):
+                self._connections[server_id] = {
+                    "status": "needs_oauth",
+                    "name": srv.name,
+                    "error": "OAuth token expired; reconnect from MCP settings",
+                }
+                self._generation += 1
+                return False
+
+            await self.disconnect_server(server_id)
+            return await self.connect_server(
+                server_id=srv.id,
+                name=srv.name,
+                transport=srv.transport,
+                command=srv.command,
+                args=args,
+                env=env,
+                url=srv.url,
+                oauth_config=oauth_config,
+            )
+        finally:
+            db.close()
+
     def get_all_openai_schemas(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
         """Return all MCP tools in OpenAI function-calling format.
 
@@ -476,11 +901,13 @@ class McpManager:
         """
         schemas = []
         for server_id, tools in self._tools.items():
+            conn = self._connections.get(server_id, {})
+            if conn.get("status") != "connected":
+                continue
             # Skip builtin Python servers — they use the code-block tool format
             # But include NPX-based builtins (like browser) which need function calling
             if self.is_builtin(server_id) and server_id != "builtin_browser":
                 continue
-            conn = self._connections.get(server_id, {})
             server_name = conn.get("name", server_id)
             disabled = (disabled_map or {}).get(server_id, set())
 
@@ -491,13 +918,26 @@ class McpManager:
                 if tool["name"] in disabled:
                     continue
                 qualified = f"mcp__{server_id}__{tool['name']}"
+                parameters = _normalize_schema_for_openai(
+                    tool.get("input_schema", {"type": "object", "properties": {}})
+                )
+                required = parameters.get("required") if isinstance(parameters.get("required"), list) else []
+                description = f"[MCP:{label}] {tool['description']}"
+                if required:
+                    description = (
+                        f"{description}\n\nRequired JSON argument(s): {', '.join(required)}. "
+                        "Never call this tool with empty arguments."
+                    )
+                function_schema = {
+                    "name": qualified,
+                    "description": description,
+                    "parameters": parameters,
+                }
+                if required and _schema_is_strict_compatible(parameters):
+                    function_schema["strict"] = True
                 schema = {
                     "type": "function",
-                    "function": {
-                        "name": qualified,
-                        "description": f"[MCP:{label}] {tool['description']}",
-                        "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
-                    },
+                    "function": function_schema,
                 }
                 schemas.append(schema)
 
@@ -508,6 +948,8 @@ class McpManager:
         result = []
         for server_id, tools in self._tools.items():
             conn = self._connections.get(server_id, {})
+            if conn.get("status") != "connected":
+                continue
             disabled = (disabled_map or {}).get(server_id, set())
             for tool in tools:
                 result.append({

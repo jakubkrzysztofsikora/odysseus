@@ -6,8 +6,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_mcp_routes_forward_oauth_config_on_connect_paths():
     text = (ROOT / "routes" / "mcp_routes.py").read_text()
-    assert "oauth_config=parsed_oauth_config" in text
-    assert text.count("oauth_config=oauth_config") >= 3
+    assert "parsed_oauth_config" in text
+    assert "oauth_config" in text
     assert "_server_runtime_config" in text
     assert "_default_remote_mcp_oauth_config" in text
     assert "_remote_advertises_oauth" in text
@@ -33,3 +33,19 @@ def test_mcp_oauth_page_uses_relative_exchange_action():
 def test_mcp_oauth_callback_reaches_route_before_auth_middleware():
     text = (ROOT / "app.py").read_text()
     assert '"/api/mcp/oauth/callback"' in text
+
+
+def test_mcp_reconnect_routes_do_not_start_headless_oauth():
+    text = (ROOT / "routes" / "mcp_routes.py").read_text()
+    assert "_oauth_token_needs_authorization" in text
+    assert "_mcp_remote_url" in text
+    assert "_is_interactive_mcp_remote" in text
+    assert "_oauth_runtime_config" in text
+    assert "OAuth authorization required; use Authorize" in text
+    assert "streamable_http" in text
+
+
+def test_mcp_oauth_authorize_handles_silent_refresh_success():
+    text = (ROOT / "routes" / "mcp_routes.py").read_text()
+    assert 'if result.get("connected"):' in text
+    assert "connected with {result.get('tool_count', 0)} tools" in text

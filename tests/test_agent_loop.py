@@ -2,6 +2,7 @@
 and _append_tool_results. Uses mock imports to avoid loading the full app stack."""
 
 import sys
+import collections
 from unittest.mock import MagicMock
 
 # Mock heavy dependencies before importing
@@ -19,6 +20,8 @@ from src.agent_loop import (
     _detect_admin_intent,
     _compute_final_metrics,
     _append_tool_results,
+    _include_mcp_schema_names,
+    _record_empty_argument_tool_call,
 )
 
 
@@ -117,6 +120,98 @@ class TestDetectAdminIntent:
             {"role": "user", "content": "thanks, now just say hello"},
         ]
         assert _detect_admin_intent(msgs) is False
+
+
+# ---------------------------------------------------------------------------
+# MCP tool visibility
+# ---------------------------------------------------------------------------
+
+
+class TestMcpToolVisibility:
+    def test_multiagent_force_includes_mcp_schema_names(self):
+        schemas = [
+            {"type": "function", "function": {"name": "mcp__atlassian__search"}},
+            {"type": "function", "function": {"name": "mcp__browser__navigate"}},
+        ]
+
+        tools = _include_mcp_schema_names(
+            {"api_call"},
+            schemas,
+            force_all_mcp_tools=True,
+        )
+
+        assert tools == {
+            "api_call",
+            "mcp__atlassian__search",
+            "mcp__browser__navigate",
+        }
+
+    def test_normal_agent_keeps_rag_selected_tools_compact(self):
+        schemas = [
+            {"type": "function", "function": {"name": "mcp__atlassian__search"}},
+        ]
+
+        tools = _include_mcp_schema_names(
+            {"api_call"},
+            schemas,
+            force_all_mcp_tools=False,
+        )
+
+        assert tools == {"api_call"}
+
+
+# ---------------------------------------------------------------------------
+# Empty-argument tool quarantine
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyArgumentToolQuarantine:
+    def test_second_empty_arg_error_disables_tool(self):
+        disabled = set()
+        counts = collections.Counter()
+        result = {
+            "exit_code": 2,
+            "error": "Tool 'bash' was called with empty arguments. Retry.",
+        }
+
+        first = _record_empty_argument_tool_call("bash", result, disabled, counts)
+        second = _record_empty_argument_tool_call("bash", result, disabled, counts)
+        third = _record_empty_argument_tool_call("bash", result, disabled, counts)
+
+        assert "not a real external blocker yet" in first
+        assert "not a real external blocker yet" in second
+        assert "bash" in disabled
+        assert "disabled for the rest of this turn" in third
+
+    def test_missing_required_mcp_args_get_retry_note(self):
+        disabled = set()
+        counts = collections.Counter()
+        result = {
+            "exit_code": 2,
+            "error": "Tool 'mcp__atlassian__search' was called with missing required arguments",
+            "missing_required": ["query"],
+        }
+
+        note = _record_empty_argument_tool_call(
+            "mcp__atlassian__search",
+            result,
+            disabled,
+            counts,
+        )
+
+        assert "missing query" in note
+        assert "not a real external blocker yet" in note
+        assert disabled == set()
+
+    def test_non_empty_arg_error_is_ignored(self):
+        disabled = set()
+        counts = collections.Counter()
+        result = {"exit_code": 1, "error": "command failed"}
+
+        note = _record_empty_argument_tool_call("bash", result, disabled, counts)
+
+        assert note is None
+        assert disabled == set()
 
 
 # ---------------------------------------------------------------------------

@@ -89,3 +89,10 @@ docs/windows-port/
 compound.config.json
 *.error.log
 _scratch/
+
+# Local tailnet deployment artifacts
+deploy/.admin-pw
+deploy/*.key
+deploy/*.crt
+deploy/*.log
+deploy/caddy_data/

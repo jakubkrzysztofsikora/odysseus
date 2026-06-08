@@ -119,6 +119,20 @@ def _clear_host_dead(url: str) -> None:
         _host_fails.pop(key, None)
 
 
+def _iter_concatenated_json(data: str):
+    """Yield JSON values from one SSE data payload, including `{...}{...}`."""
+    decoder = json.JSONDecoder()
+    pos = 0
+    text = data.strip()
+    while pos < len(text):
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos >= len(text):
+            break
+        value, pos = decoder.raw_decode(text, pos)
+        yield value
+
+
 # Shared async HTTP client. Reusing one client keeps connections warm:
 # repeat calls to api.anthropic.com / api.openai.com / openrouter skip the
 # 100-500ms TCP+TLS handshake. Lazy init so we bind to the running event loop.
@@ -315,6 +329,20 @@ def _detect_provider(url: str) -> str:
     if _host_match(url, "groq.com"):
         return "groq"
     return "openai"
+
+
+def _disable_parallel_tool_calls_for_url(url: str) -> bool:
+    """Return True when the OpenAI-compatible endpoint accepts this knob."""
+    if _host_match(url, "openai.com"):
+        return True
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return False
+    if "litellm" in host:
+        return True
+    return host in {"localhost", "127.0.0.1", "0.0.0.0"} and parsed.port == 4000
 
 
 def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str, str]:
@@ -838,7 +866,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         target_url = _normalize_ollama_url(url)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            stream=False, num_ctx=get_context_length(url, model, headers=headers),
         )
     else:
         target_url = url
@@ -984,7 +1012,7 @@ async def llm_call_async(
             h.update(headers)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            stream=False, num_ctx=get_context_length(url, model, headers=headers),
         )
     else:
         target_url = url
@@ -1088,7 +1116,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             h.update(headers)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=True, tools=tools, num_ctx=get_context_length(url, model),
+            stream=True, tools=tools, num_ctx=get_context_length(url, model, headers=headers),
         )
     else:
         target_url = url
@@ -1107,6 +1135,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             payload[tok_key] = max_tokens
         if tools:
             payload["tools"] = tools
+            if _disable_parallel_tool_calls_for_url(target_url):
+                payload["parallel_tool_calls"] = False
         h = _provider_headers(provider, headers)
 
     # Short connect timeout: a reachable peer answers SYN in <100ms even on
@@ -1297,6 +1327,105 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         calls = [_tc_acc[i] for i in sorted(_tc_acc)]
         return f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
 
+    def _events_for_openai_chunk(j):
+        nonlocal _first_content_sent
+        if not isinstance(j, dict):
+            return
+
+        # Usage chunk (from stream_options)
+        _choices = j.get("choices") or []
+        _delta0 = _choices[0].get("delta") if _choices else None
+        # Capture usage whenever the chunk carries it and the delta has no
+        # actual output. Some gateways / local servers attach usage to the
+        # FINAL delta, which also carries role/finish_reason (so it is not
+        # exactly None/{}/{"content": None}); gating on those exact shapes
+        # discarded their token counts.
+        _delta_has_output = isinstance(_delta0, dict) and (
+            _delta0.get("content")
+            or _delta0.get("reasoning_content")
+            or _delta0.get("reasoning")
+            or _delta0.get("tool_calls")
+        )
+        if "usage" in j and not _delta_has_output:
+            u = j["usage"]
+            _usage_data = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
+            # llama.cpp puts a `timings` block alongside `usage` with the
+            # TRUE generation speed (predicted_per_second) — pure decode,
+            # excluding prefill/network. Pass it through so the UI shows the
+            # real gen t/s instead of recomputing tokens/wall-clock (which
+            # includes prefill and reads ~20-40% low). Prefill speed too.
+            _tm = j.get("timings")
+            if isinstance(_tm, dict):
+                if _tm.get("predicted_per_second"):
+                    _usage_data["gen_tps"] = round(_tm["predicted_per_second"], 2)
+                if _tm.get("prompt_per_second"):
+                    _usage_data["prefill_tps"] = round(_tm["prompt_per_second"], 2)
+            yield f'data: {json.dumps({"type": "usage", "data": _usage_data})}\n\n'
+        elif _choices:
+            delta = _choices[0].get("delta") or {}
+            if isinstance(delta, dict):
+                # Reasoning tokens (VLLM --reasoning-parser, e.g. Qwen3/DeepSeek-R1, Nemotron). vLLM 0.20.2 / NIM emit the field as `reasoning`; older builds use `reasoning_content`. Accept either.
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if reasoning:
+                    yield f'data: {json.dumps({"delta": reasoning, "thinking": True})}\n\n'
+                content = delta.get("content") or ""
+                if content:
+                    # Some thinking backends start normal content with a
+                    # stray closing tag. Repair only that shape; do not
+                    # wrap every first token for model families like
+                    # MiniMax, which often stream ordinary answers.
+                    if _thinking_model and not _first_content_sent and content.lstrip().lower().startswith("</think"):
+                        content = "<think>" + content
+                    _first_content_sent = True
+                    yield f'data: {json.dumps({"delta": content})}\n\n'
+                # Native tool calls — accumulate across chunks
+                for tc in delta.get("tool_calls") or []:
+                    func = tc.get("function") or {}
+                    raw_idx = tc.get("index")
+                    if raw_idx is None:
+                        # Gemini's OpenAI-compat layer omits `index` on
+                        # parallel tool calls (every delta arrives as
+                        # index=None) and sends each call complete in one
+                        # delta. Without this, all parallel calls collide
+                        # into slot 0 — later calls overwrite the first's
+                        # name and CORRUPT its arguments by concatenation,
+                        # so only one malformed call survives and the
+                        # follow-up round 400s. A function name marks the
+                        # start of a new call → allocate a fresh slot;
+                        # an arg-only continuation attaches to the last.
+                        if func.get("name") or _tc_last_idx[0] < 0:
+                            # Next free slot ABOVE any existing key (not
+                            # len()), so a provider mixing integer indices
+                            # with index=None can never collide.
+                            idx = max(_tc_acc, default=-1) + 1
+                        else:
+                            idx = _tc_last_idx[0]
+                    else:
+                        idx = raw_idx
+                    _tc_last_idx[0] = idx
+                    if idx not in _tc_acc:
+                        _tc_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc.get("id"):
+                        _tc_acc[idx]["id"] = tc["id"]
+                    # Gemini 3 returns an opaque thought_signature in
+                    # extra_content on the function-call delta. It MUST be
+                    # echoed back on the assistant tool_call next round or the
+                    # follow-up request 400s ("Function call is missing a
+                    # thought_signature"). Preserve it verbatim; other
+                    # providers never send it, so this is a no-op for them.
+                    if tc.get("extra_content"):
+                        _tc_acc[idx]["extra_content"] = tc["extra_content"]
+                    if func.get("name"):
+                        _tc_acc[idx]["name"] = func["name"]
+                    if "arguments" in func:
+                        _tc_acc[idx]["arguments"] += func["arguments"]
+                        # Stream tool arg deltas for doc tools
+                        if func["arguments"] and _tc_acc[idx].get("name") in ("create_document", "update_document", "edit_document"):
+                            yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
+        elif "text" in j:
+            if j["text"]:
+                yield f'data: {json.dumps({"delta": j["text"]})}\n\n'
+
     try:
         client = _get_http_client()
         async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -1326,102 +1455,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     try:
                         if data.strip():
                             if data.startswith("{"):
-                                j = json.loads(data)
-                                # Usage chunk (from stream_options)
-                                _choices = j.get("choices") or []
-                                _delta0 = _choices[0].get("delta") if _choices else None
-                                # Capture usage whenever the chunk carries it and
-                                # the delta has no actual output. Some gateways /
-                                # local servers attach usage to the FINAL delta,
-                                # which also carries role/finish_reason (so it is
-                                # not exactly None/{}/{"content": None}); gating on
-                                # those exact shapes discarded their token counts.
-                                _delta_has_output = isinstance(_delta0, dict) and (
-                                    _delta0.get("content")
-                                    or _delta0.get("reasoning_content")
-                                    or _delta0.get("reasoning")
-                                    or _delta0.get("tool_calls")
-                                )
-                                if "usage" in j and not _delta_has_output:
-                                    u = j["usage"]
-                                    _usage_data = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
-                                    # llama.cpp puts a `timings` block alongside `usage` with the
-                                    # TRUE generation speed (predicted_per_second) — pure decode,
-                                    # excluding prefill/network. Pass it through so the UI shows the
-                                    # real gen t/s instead of recomputing tokens/wall-clock (which
-                                    # includes prefill and reads ~20-40% low). Prefill speed too.
-                                    _tm = j.get("timings")
-                                    if isinstance(_tm, dict):
-                                        if _tm.get("predicted_per_second"):
-                                            _usage_data["gen_tps"] = round(_tm["predicted_per_second"], 2)
-                                        if _tm.get("prompt_per_second"):
-                                            _usage_data["prefill_tps"] = round(_tm["prompt_per_second"], 2)
-                                    yield f'data: {json.dumps({"type": "usage", "data": _usage_data})}\n\n'
-                                elif "choices" in j:
-                                    delta = j["choices"][0].get("delta") or {}
-                                    if isinstance(delta, dict):
-                                        # Text content
-                                        # Reasoning tokens (VLLM --reasoning-parser, e.g. Qwen3/DeepSeek-R1, Nemotron). vLLM 0.20.2 / NIM emit the field as `reasoning`; older builds use `reasoning_content`. Accept either.
-                                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                                        if reasoning:
-                                            yield f'data: {json.dumps({"delta": reasoning, "thinking": True})}\n\n'
-                                        content = delta.get("content") or ""
-                                        if content:
-                                            # Some thinking backends start normal content with a
-                                            # stray closing tag. Repair only that shape; do not
-                                            # wrap every first token for model families like
-                                            # MiniMax, which often stream ordinary answers.
-                                            if _thinking_model and not _first_content_sent and content.lstrip().lower().startswith("</think"):
-                                                content = "<think>" + content
-                                            _first_content_sent = True
-                                            yield f'data: {json.dumps({"delta": content})}\n\n'
-                                        # Native tool calls — accumulate across chunks
-                                        for tc in delta.get("tool_calls") or []:
-                                            func = tc.get("function") or {}
-                                            raw_idx = tc.get("index")
-                                            if raw_idx is None:
-                                                # Gemini's OpenAI-compat layer omits `index` on
-                                                # parallel tool calls (every delta arrives as
-                                                # index=None) and sends each call complete in one
-                                                # delta. Without this, all parallel calls collide
-                                                # into slot 0 — later calls overwrite the first's
-                                                # name and CORRUPT its arguments by concatenation,
-                                                # so only one malformed call survives and the
-                                                # follow-up round 400s. A function name marks the
-                                                # start of a new call → allocate a fresh slot;
-                                                # an arg-only continuation attaches to the last.
-                                                if func.get("name") or _tc_last_idx[0] < 0:
-                                                    # Next free slot ABOVE any existing key (not
-                                                    # len()), so a provider mixing integer indices
-                                                    # with index=None can never collide.
-                                                    idx = max(_tc_acc, default=-1) + 1
-                                                else:
-                                                    idx = _tc_last_idx[0]
-                                            else:
-                                                idx = raw_idx
-                                            _tc_last_idx[0] = idx
-                                            if idx not in _tc_acc:
-                                                _tc_acc[idx] = {"id": "", "name": "", "arguments": ""}
-                                            if tc.get("id"):
-                                                _tc_acc[idx]["id"] = tc["id"]
-                                            # Gemini 3 returns an opaque thought_signature in
-                                            # extra_content on the function-call delta. It MUST be
-                                            # echoed back on the assistant tool_call next round or the
-                                            # follow-up request 400s ("Function call is missing a
-                                            # thought_signature"). Preserve it verbatim; other
-                                            # providers never send it, so this is a no-op for them.
-                                            if tc.get("extra_content"):
-                                                _tc_acc[idx]["extra_content"] = tc["extra_content"]
-                                            if func.get("name"):
-                                                _tc_acc[idx]["name"] = func["name"]
-                                            if "arguments" in func:
-                                                _tc_acc[idx]["arguments"] += func["arguments"]
-                                                # Stream tool arg deltas for doc tools
-                                                if func["arguments"] and _tc_acc[idx].get("name") in ("create_document", "update_document", "edit_document"):
-                                                    yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
-                                elif "text" in j:
-                                    if j["text"]:
-                                        yield f'data: {json.dumps({"delta": j["text"]})}\n\n'
+                                for j in _iter_concatenated_json(data):
+                                    for event in _events_for_openai_chunk(j):
+                                        yield event
                             else:
                                 if data.strip():
                                     yield f'data: {json.dumps({"delta": data})}\n\n'
@@ -1467,6 +1503,54 @@ def _summarize_stream_error(err_chunk: Optional[str]) -> str:
     return "primary model failed"
 
 
+def _stream_chunk_has_real_output(chunk: str) -> bool:
+    """Return True when an SSE chunk carries assistant output, not metadata.
+
+    A model can return HTTP 200, emit only usage and [DONE], and leave the
+    agent with an empty card. Treat that as pre-content failure in the fallback
+    wrapper instead of accepting it as a successful answer.
+    """
+    if not chunk.startswith("data: ") or chunk.startswith("data: [DONE]"):
+        return False
+    for line in chunk.splitlines():
+        line = line.strip()
+        if not line.startswith("data: "):
+            continue
+        data = line[6:].strip()
+        if not data or data == "[DONE]":
+            continue
+        if not data.startswith("{"):
+            return True
+        try:
+            values = list(_iter_concatenated_json(data))
+        except Exception:
+            return True
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            if value.get("type") == "tool_calls" and value.get("calls"):
+                return True
+            if value.get("type") == "tool_call_delta" and value.get("arg_delta"):
+                return True
+            if value.get("delta"):
+                return True
+    return False
+
+
+def _empty_stream_error(model: str) -> str:
+    return (
+        "event: error\n"
+        "data: "
+        + json.dumps(
+            {
+                "error": f"Model {model} returned an empty stream",
+                "status": 502,
+            }
+        )
+        + "\n\n"
+    )
+
+
 async def stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
@@ -1491,6 +1575,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         is_last = (i == len(cands) - 1)
         emitted = False
         retried = False
+        pending_chunks = []
         async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
             if chunk.startswith("event: error"):
                 if not emitted and not is_last:
@@ -1505,8 +1590,24 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                     break
                 yield chunk
                 continue
-            # Any data chunk other than the terminal [DONE] means real output.
-            if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+            if chunk.startswith("data: [DONE]"):
+                if not emitted:
+                    last_error = _empty_stream_error(model)
+                    if not is_last:
+                        retried = True
+                        if i == 0:
+                            logger.warning(f"[fallback] primary {model} returned empty stream; trying fallback")
+                        else:
+                            logger.warning(f"[fallback] candidate {model} returned empty stream; trying next")
+                        break
+                    yield last_error
+                    return
+                yield chunk
+                continue
+            # Only content / reasoning / tool-call chunks are real output.
+            # Usage, metrics, and other metadata are held until output arrives;
+            # if it never does, they are discarded and the next candidate runs.
+            if _stream_chunk_has_real_output(chunk):
                 # First real output from a NON-primary candidate: tell the client
                 # the selected model failed and another answered. Without this the
                 # fallback is invisible — a misconfigured provider looks like it
@@ -1521,7 +1622,28 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                         "reason": _summarize_stream_error(last_error),
                     }) + '\n\n')
                 emitted = True
-            yield chunk
+                for pending in pending_chunks:
+                    yield pending
+                pending_chunks = []
+                yield chunk
+                continue
+            if emitted:
+                yield chunk
+            elif chunk.startswith("data: "):
+                pending_chunks.append(chunk)
+            else:
+                yield chunk
+        else:
+            if not emitted:
+                last_error = _empty_stream_error(model)
+                if not is_last:
+                    retried = True
+                    if i == 0:
+                        logger.warning(f"[fallback] primary {model} returned empty stream; trying fallback")
+                    else:
+                        logger.warning(f"[fallback] candidate {model} returned empty stream; trying next")
+                else:
+                    yield last_error
         if not retried:
             return  # candidate finished (success, or terminal error already sent)
     # Every candidate failed pre-content — surface the last error.

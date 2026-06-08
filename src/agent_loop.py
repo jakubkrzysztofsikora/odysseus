@@ -1059,6 +1059,43 @@ def _build_base_prompt(
     return agent_prompt, skill_index_block
 
 
+def _schema_function_names(schemas: list) -> Set[str]:
+    names = set()
+    for schema in schemas or []:
+        name = None
+        if isinstance(schema, dict):
+            fn = schema.get("function")
+            if isinstance(fn, dict):
+                name = fn.get("name")
+            name = name or schema.get("name")
+        if name:
+            names.add(str(name))
+    return names
+
+
+def _include_mcp_schema_names(
+    relevant_tools: Optional[Set[str]],
+    mcp_schemas: list,
+    *,
+    force_all_mcp_tools: bool,
+) -> Optional[Set[str]]:
+    """Make MCP native schemas eligible for the outgoing tool list.
+
+    RAG normally keeps the tool list compact. Multiagent/group runs are a
+    deliberate exception: participants are expected to have the same external
+    tool surface as an agent, and reconnecting an MCP server mid-run must make
+    its newly discovered tools callable on the next round.
+    """
+    if not force_all_mcp_tools:
+        return relevant_tools
+    schema_names = _schema_function_names(mcp_schemas)
+    if not schema_names:
+        return relevant_tools
+    merged = set(relevant_tools or set())
+    merged.update(schema_names)
+    return merged
+
+
 
 def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num: int):
     """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
@@ -1163,6 +1200,42 @@ def _append_tool_results(
         messages.append(
             {"role": "user", "content": f"[Tool execution results]\n\n{tool_output_text}"}
         )
+
+
+def _record_empty_argument_tool_call(
+    tool_type: str,
+    result: Dict,
+    disabled_tools: Set[str],
+    empty_arg_tool_counts: collections.Counter,
+    *,
+    threshold: int = 3,
+) -> Optional[str]:
+    """Disable a tool after repeated missing-argument native calls."""
+    tool_error = str(result.get("error", "") or "")
+    missing = result.get("missing_required") or []
+    missing_text = ", ".join(str(m) for m in missing) if missing else "the required fields"
+    retry_hint = (
+        f"The {tool_type} tool call was missing {missing_text}. "
+        "Retry with the required argument fields populated. This is not a real "
+        "external blocker yet; do not claim you are blocked unless a correctly "
+        "populated call also fails."
+    )
+    if result.get("exit_code") != 2 or (
+        "empty arguments" not in tool_error
+        and "missing required" not in tool_error
+        and not missing
+    ):
+        return None
+    empty_arg_tool_counts[tool_type] += 1
+    if empty_arg_tool_counts[tool_type] < threshold:
+        return retry_hint
+    disabled_tools.add(tool_type)
+    return (
+        f"The {tool_type} tool was called repeatedly with empty arguments "
+        f"or missing required fields and is disabled for the rest of this turn. "
+        "Use a different tool if one fits, or answer from the information already "
+        f"available. Do not call {tool_type} again in this turn."
+    )
 
 
 def _compute_final_metrics(
@@ -1356,6 +1429,7 @@ async def stream_agent_loop(
     owner: Optional[str] = None,
     relevant_tools: Optional[Set[str]] = None,
     fallbacks: Optional[List[tuple]] = None,
+    force_all_mcp_tools: bool = False,
     _is_teacher_run: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
@@ -1493,6 +1567,11 @@ async def stream_agent_loop(
     # and can override this list for users who know their setup.
     _model_no_tools = any(kw in _model_lc for kw in (
         "deepseek-r1",
+        # LiteLLM's ChatGPT subscription/Responses routes can emit a native
+        # tool-call name but return empty arguments for strict JSON schemas.
+        # Use Odysseus' fenced tool protocol unless the endpoint is explicitly
+        # overridden to native tools.
+        "chatgpt/",
     ))
     # Native Ollama endpoints (/api/chat) handle tool schemas differently from
     # the OpenAI-compat path. Models like gemma4, qwen3.5, ministral respond to
@@ -1516,6 +1595,12 @@ async def stream_agent_loop(
         compact=_is_api_model,
         owner=owner,
     )
+    _relevant_tools = _include_mcp_schema_names(
+        _relevant_tools,
+        mcp_schemas,
+        force_all_mcp_tools=force_all_mcp_tools,
+    )
+    _last_mcp_generation = getattr(mcp_mgr, "_generation", None) if mcp_mgr else None
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
@@ -1598,6 +1683,7 @@ async def stream_agent_loop(
     _recent_call_sigs = collections.deque(maxlen=6)
     _stuck_rounds = 0
     _tool_type_counts: collections.Counter = collections.Counter()
+    _empty_arg_tool_counts: collections.Counter = collections.Counter()
     _THINK_RE = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
 
@@ -1619,6 +1705,52 @@ async def stream_agent_loop(
         # fenced block closes we advance this so the next iteration can
         # detect a SUBSEQUENT block in the same round.
         _doc_scan_from = 0
+
+        if mcp_mgr:
+            _current_mcp_generation = getattr(mcp_mgr, "_generation", 0)
+            if _last_mcp_generation is not None and _current_mcp_generation != _last_mcp_generation:
+                _mcp_disabled_map = _load_mcp_disabled_map()
+                try:
+                    mcp_schemas = mcp_mgr.get_all_openai_schemas(_mcp_disabled_map)
+                except Exception as _e:
+                    logger.warning("[agent] MCP schema refresh failed: %s", _e)
+                    mcp_schemas = []
+
+                try:
+                    from src.tool_index import get_tool_index
+                    tool_idx = get_tool_index()
+                    if tool_idx:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(tool_idx.index_mcp_tools, mcp_mgr, _mcp_disabled_map),
+                            timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
+                        )
+                        if _retrieval_query:
+                            refreshed = await asyncio.wait_for(
+                                asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, 8),
+                                timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
+                            )
+                            _relevant_tools = set(_relevant_tools or set())
+                            _relevant_tools.update(refreshed)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[agent] MCP tool refresh retrieval exceeded %.1fs; keeping existing selection",
+                        _TOOL_SELECTION_TIMEOUT_SECONDS,
+                    )
+                except Exception as _e:
+                    logger.warning("[agent] MCP tool refresh retrieval failed: %s", _e)
+
+                _relevant_tools = _include_mcp_schema_names(
+                    _relevant_tools,
+                    mcp_schemas,
+                    force_all_mcp_tools=force_all_mcp_tools,
+                )
+                logger.info(
+                    "[agent] MCP tool set refreshed: generation %s -> %s, schemas=%d",
+                    _last_mcp_generation,
+                    _current_mcp_generation,
+                    len(mcp_schemas or []),
+                )
+                _last_mcp_generation = _current_mcp_generation
 
         # Merge native tool schemas with MCP tool schemas, filtering out
         # Only send function schemas for API models (OpenAI, Anthropic, etc.).
@@ -1995,8 +2127,10 @@ async def stream_agent_loop(
                     "You're repeating tool calls without converging. STOP calling "
                     "tools and end the turn one of two ways: (a) write your best "
                     "final answer NOW from the information already gathered, or "
-                    "(b) if you're genuinely blocked, say plainly what's blocking "
-                    "you in a sentence or two." + _off_note
+                    "(b) if a correctly populated external tool call failed, say "
+                    "plainly what's blocking you in a sentence or two. Do not claim "
+                    "you are blocked merely because an earlier tool call was missing "
+                    "required arguments." + _off_note
                 ),
             })
             full_response += "\n\n"
@@ -2037,6 +2171,7 @@ async def stream_agent_loop(
         # Execute each tool block
         tool_results = []
         tool_result_texts = []  # plain text for native tool role messages
+        post_tool_system_notes = []
         budget_hit = False
         for i, block in enumerate(tool_blocks):
             # --- Tool budget check ---
@@ -2091,6 +2226,15 @@ async def stream_agent_loop(
                     f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
                 )
             desc, result = await _tool_task
+
+            _empty_arg_note = _record_empty_argument_tool_call(
+                block.tool_type,
+                result,
+                disabled_tools,
+                _empty_arg_tool_counts,
+            )
+            if _empty_arg_note:
+                post_tool_system_notes.append(_empty_arg_note)
 
             # Extract structured web sources from web_search tool output.
             # web_search returns {"output": ..., "exit_code": 0}; check "output"
@@ -2248,6 +2392,8 @@ async def stream_agent_loop(
         _append_tool_results(messages, round_response, native_tool_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning)
+        for note in post_tool_system_notes:
+            messages.append({"role": "system", "content": note})
 
         # Emit agent_step event
         yield (

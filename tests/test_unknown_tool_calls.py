@@ -16,6 +16,7 @@ for mod in [
 
 import pytest
 import src.agent_tools
+import src.tool_execution as tool_execution
 from src.tool_parsing import parse_tool_blocks
 from src.tool_schemas import function_call_to_tool_block
 from src.tool_execution import execute_tool_block
@@ -61,3 +62,14 @@ def test_google_search_mapping():
     assert block is not None
     assert block.tool_type == "web_search"
     assert block.content == "testing google search string"
+
+
+@pytest.mark.asyncio
+async def test_empty_bash_tool_returns_error_instead_of_success(monkeypatch):
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda _owner: True)
+
+    desc, result = await execute_tool_block(SimpleNamespace(tool_type="bash", content=""))
+
+    assert desc == "bash: EMPTY"
+    assert result["exit_code"] == 2
+    assert "empty arguments" in result["error"]

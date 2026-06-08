@@ -24,6 +24,7 @@ def _compute_is_api_model(model: str, endpoint_url: str, endpoint_supports=None)
     ))
     model_no_tools = any(kw in model_lc for kw in (
         "deepseek-r1",
+        "chatgpt/",
     ))
 
     if endpoint_supports is True:
@@ -96,6 +97,21 @@ class TestDeepSeekToolSupport:
 
     def test_llama_local_gets_tools_via_host(self):
         assert _compute_is_api_model("llama3.2:3b", "http://localhost:11434/v1") is True
+
+
+class TestChatGptSubscriptionToolSupport:
+    def test_chatgpt_subscription_route_uses_fenced_tools(self):
+        assert _compute_is_api_model(
+            "chatgpt/gpt-5.5",
+            "http://litellm.tail5d39b4.ts.net:4000/v1",
+        ) is False
+
+    def test_chatgpt_endpoint_override_can_force_native_tools(self):
+        assert _compute_is_api_model(
+            "chatgpt/gpt-5.5",
+            "http://litellm.tail5d39b4.ts.net:4000/v1",
+            endpoint_supports=True,
+        ) is True
 
 
 class TestApiHostsContainsDeepSeek:

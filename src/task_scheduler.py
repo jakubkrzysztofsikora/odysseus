@@ -852,6 +852,10 @@ class TaskScheduler:
 
         except Exception as exec_exc:
             logger.exception(f"Task {task_id} execution error")
+            try:
+                db.rollback()
+            except Exception:
+                pass
             # Fetch the task's owner so the error notification reaches
             # the same user the success notification would have.
             _owner = None
@@ -1460,6 +1464,16 @@ class TaskScheduler:
                     self._session_manager.sessions[session_id] = self._session_manager._db_to_session(sess)
                 except Exception:
                     pass
+        else:
+            sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if not sess:
+                logger.warning(
+                    "Skipping task result delivery for %s because session %s no longer exists",
+                    task.id,
+                    session_id,
+                )
+                task.session_id = None
+                return
 
         meta = {}
         if model_name:
