@@ -13,6 +13,7 @@ A self-hosted AI workspace -- meant to be the self-hosted version of the UI expe
 ## Features
   - **Chat** -- chat with any local model or API; adding them is super simple.<br>　<sub>vLLM · llama.cpp · Ollama · OpenRouter · OpenAI · GitHub Copilot</sub>
   - **Agent** -- hand it tools and let it run the whole task itself.<br>　<sub>built on [opencode](https://github.com/anomalyco/opencode) · MCP · web · files · shell · skills · memory</sub>
+  - **Group agents** -- run several personas/models as one workflow; sequential mode passes each agent's artifact to the next agent in order.<br>　<sub>MCP-aware · repo workspace tools · checker/reviewer handoff · raw tool-call cleanup</sub>
   - **Cookbook** -- Scans your hardware, recommends models, click to download and serve.. easy!<br>　<sub>built on [llmfit](https://github.com/AlexsJones/llmfit) · VRAM-aware · GGUF / FP8 / AWQ · fit scoring · vLLM / llama.cpp serving</sub>
   - **Deep Research** -- multi-step runs that gather, read, and synthesize sources into a nice visual report.<br>　<sub>adapted from [Tongyi DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)</sub>
   - **Compare** -- a fun tool to compare models side by side. Test completely blind, no bias!<br>　<sub>multi-model · blind test · synthesis</sub>
@@ -412,6 +413,12 @@ That installs `@playwright/mcp` plus Playwright (~300MB total). Restart Odysseus
 For hosted MCP servers, use the `HTTP` transport in Settings. This maps to the MCP Streamable HTTP transport; legacy `SSE` is only for older servers that have not migrated. If a remote server advertises OAuth with a `WWW-Authenticate: Bearer ...` response, Odysseus stores an MCP OAuth config, shows the server as `Needs authorization`, and exposes an `Authorize` action instead of retrying a disconnected session.
 
 The OAuth callback endpoint is `/api/mcp/oauth/callback`. If the provider redirects to a localhost URL that your browser cannot complete, copy the full callback URL from the browser address bar and paste it into the Odysseus authorization page.
+
+### Group agent workflows
+
+Group chat runs each participant in agent mode so MCP, web, shell, and file tools are available subject to the same server-side privilege gates and disabled-tool settings as normal agent chat. If a workspace is selected with `/workspace` or the workspace picker, that folder is sent with each group-agent turn so repo reads, searches, and shell commands run from the intended project.
+
+Sequential mode is strict order: the first participant receives the user prompt, and each following participant receives the previous participant's cleaned artifact. The injected group prompt tells agents to call tools with explicit arguments, redact sensitive internal details, and produce role-specific artifacts that checker/reviewer agents can validate into an execution plan.
 
 ## Architecture
 ```

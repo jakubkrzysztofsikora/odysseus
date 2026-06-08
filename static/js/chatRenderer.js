@@ -417,6 +417,9 @@ const XML_INVOKE_RE = /<invoke\s+name=['"][^'"]*['"]>[\s\S]*?<\/invoke>/gi;
 // (e.g. mid-stream before the closing tag arrives).
 const DSML_TOOL_RE = /<\s*[｜|]+\s*DSML\s*[｜|]+\s*tool_calls\s*>[\s\S]*?(?:<\s*\/\s*[｜|]+\s*DSML\s*[｜|]+\s*tool_calls\s*>|$)/gi;
 const DSML_STRAY_RE = /<\s*\/?\s*[｜|]+\s*DSML\s*[｜|]+[^>]*>/gi;
+// Raw provider-native function calls that leaked as content, e.g.
+// mcp__0ac61a6b__search\Eloquent{"query":"..."}
+const RAW_FUNCTION_CALL_RE = /(^|\s)(?:mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+|web_search|web_fetch|bash|python|read_file|write_file|create_document|edit_document|update_document|suggest_document)\s*(?:\\?[A-Za-z][A-Za-z0-9_.-]*)?\s*\{[^\n]*\}/g;
 // Self-narration about tool results (model echoing stdout/exit_code)
 const TOOL_NARRATION_RE = /(?:The (?:result|output) shows?:?\s*)?-?\s*(?:stdout|stderr|exit_code):\s*.+/gi;
 
@@ -797,6 +800,7 @@ export function stripToolBlocks(text) {
   cleaned = cleaned.replace(EXEC_FENCE_RE, '');
   cleaned = cleaned.replace(DSML_TOOL_RE, '');
   cleaned = cleaned.replace(DSML_STRAY_RE, '');
+  cleaned = cleaned.replace(RAW_FUNCTION_CALL_RE, '$1');
   cleaned = cleaned.replace(XML_TOOL_CALL_RE, '');
   cleaned = cleaned.replace(XML_INVOKE_RE, '');
   cleaned = cleaned.replace(TOOL_NARRATION_RE, '');

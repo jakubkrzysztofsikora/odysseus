@@ -391,6 +391,12 @@ def setup_chat_routes(
         allow_bash = form_data.get("allow_bash")
         allow_web_search = form_data.get("allow_web_search")
         use_rag = form_data.get("use_rag")
+        workspace = str(form_data.get("workspace") or "").strip()
+        if workspace:
+            workspace = os.path.realpath(os.path.expanduser(workspace))
+            if not os.path.isdir(workspace):
+                logger.warning("Ignoring invalid tool workspace: %s", workspace)
+                workspace = ""
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         multiagent_mode = str(form_data.get("multiagent", "")).lower() == "true"
@@ -1012,6 +1018,7 @@ def setup_chat_routes(
                         owner=_user,
                         fallbacks=_fallback_candidates,
                         force_all_mcp_tools=multiagent_mode,
+                        workspace=workspace or None,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:

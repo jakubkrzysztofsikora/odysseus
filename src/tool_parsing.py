@@ -54,6 +54,20 @@ _TOOL_CODE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Pattern 6: raw function-call lines that leaked into assistant content
+# instead of provider-native `tool_calls`. Seen with Mistral-shaped output:
+#
+#   mcp__0ac61a6b__search\Eloquent{"query": "Circit internal AI"}
+#
+# The optional "Eloquent" marker is tolerated because some runtimes append it
+# between the function name and JSON arguments. We still route through the
+# canonical native function-call converter, so unknown names are ignored rather
+# than executed.
+_RAW_FUNCTION_CALL_RE = re.compile(
+    r"(?<![\w.-])(?P<name>mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+|[A-Za-z_][\w.-]*)"
+    r"[ \t]*(?:\\?[A-Za-z][A-Za-z0-9_.-]*)?[ \t]*(?=\{)"
+)
+
 # Pattern 5: DeepSeek DSML markup leaking into content. When deepseek
 # models can't emit structured tool_calls (e.g. we sent no tool schemas
 # that round, or the API didn't parse them), they fall back to raw
@@ -329,6 +343,74 @@ def _parse_tool_code_block(raw: str) -> Optional[ToolBlock]:
     return None
 
 
+def _parse_raw_function_calls(text: str) -> List[ToolBlock]:
+    """Parse raw single-line function calls emitted in assistant content.
+
+    This catches provider/runtime leaks where the model writes the function
+    call directly as content instead of using native `tool_calls`. Each match is
+    still validated by function_call_to_tool_block; unknown names are dropped.
+    """
+    blocks: List[ToolBlock] = []
+    if not isinstance(text, str) or "{" not in text:
+        return blocks
+
+    decoder = json.JSONDecoder()
+    from src.tool_schemas import function_call_to_tool_block
+
+    for match in _RAW_FUNCTION_CALL_RE.finditer(text):
+        name = match.group("name").lower()
+        try:
+            args, _end = decoder.raw_decode(text[match.end():])
+        except json.JSONDecodeError:
+            continue
+        block = function_call_to_tool_block(name, json.dumps(args))
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _strip_raw_function_calls(text: str) -> str:
+    if not isinstance(text, str) or "{" not in text:
+        return "" if text is None else text
+
+    decoder = json.JSONDecoder()
+    spans = []
+    for match in _RAW_FUNCTION_CALL_RE.finditer(text):
+        name = match.group("name").lower()
+        try:
+            args, end = decoder.raw_decode(text[match.end():])
+        except json.JSONDecodeError:
+            continue
+
+        from src.tool_schemas import function_call_to_tool_block
+        if not function_call_to_tool_block(name, json.dumps(args)):
+            continue
+
+        abs_end = match.end() + end
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", abs_end)
+        if line_end < 0:
+            line_end = len(text)
+        prefix = text[line_start:match.start()].strip()
+        suffix = text[abs_end:line_end].strip()
+        if not prefix and not suffix:
+            span_end = line_end + (1 if line_end < len(text) else 0)
+            spans.append((line_start, span_end))
+        else:
+            spans.append((match.start(), abs_end))
+
+    if not spans:
+        return text
+
+    cleaned_parts = []
+    cursor = 0
+    for start, end in spans:
+        cleaned_parts.append(text[cursor:start])
+        cursor = end
+    cleaned_parts.append(text[cursor:])
+    return "".join(cleaned_parts)
+
+
 def parse_tool_blocks(text: str) -> List[ToolBlock]:
     """Extract executable tool blocks from LLM response text.
 
@@ -338,6 +420,7 @@ def parse_tool_blocks(text: str) -> List[ToolBlock]:
     3. XML-style <tool_call>/<invoke> blocks
     4. <tool_code> blocks (MiniMax-M2.5 style)
     5. DeepSeek DSML markup (normalized to <invoke> first)
+    6. Raw native function-call lines leaked into assistant content
     """
     blocks = []
 
@@ -393,6 +476,10 @@ def parse_tool_blocks(text: str) -> List[ToolBlock]:
             if block:
                 blocks.append(block)
 
+    # Pattern 6: raw native function-call lines
+    if not blocks:
+        blocks.extend(_parse_raw_function_calls(text))
+
     return blocks
 
 
@@ -407,5 +494,6 @@ def strip_tool_blocks(text: str) -> str:
     cleaned = _TOOL_CODE_RE.sub('', cleaned)
     # Strip bare <invoke> blocks not wrapped in <tool_call>
     cleaned = re.sub(r'<invoke\s+name=["\'].*?</invoke>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = _strip_raw_function_calls(cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()

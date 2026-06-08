@@ -120,7 +120,11 @@ def test_sequential_group_uses_previous_agent_output_as_next_input(node_availabl
           body: new El('body'),
           documentElement: new El('html'),
         };
-        globalThis.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
+        globalThis.localStorage = {
+          getItem: (key) => key === 'odysseus-workspace' ? '/Users/jakubsikora/Repos/personal/odysseus' : null,
+          setItem(){},
+          removeItem(){},
+        };
         globalThis.history = { replaceState(){} };
         globalThis.performance = { now: () => Date.now() };
         globalThis.requestAnimationFrame = () => 0;
@@ -157,8 +161,13 @@ def test_sequential_group_uses_previous_agent_output_as_next_input(node_availabl
               message,
               mode: opts.body.get('mode'),
               multiagent: opts.body.get('multiagent'),
+              allowBash: opts.body.get('allow_bash'),
+              allowWebSearch: opts.body.get('allow_web_search'),
+              workspace: opts.body.get('workspace'),
             });
-            const text = `agent-${streamInputs.length}-output`;
+            const text = streamInputs.length === 1
+              ? 'mcp__0ac61a6b__search\\\\Eloquent{"query":"Circit internal AI"}\\nagent-1-output'
+              : `agent-${streamInputs.length}-output`;
             return new Response(`data: ${JSON.stringify({ delta: text })}\\n\\ndata: [DONE]\\n\\n`, {
               status: 200,
               headers: { 'Content-Type': 'text/event-stream' },
@@ -177,7 +186,11 @@ def test_sequential_group_uses_previous_agent_output_as_next_input(node_availabl
         ], null);
         await group.sendMessage('initial prompt');
 
-        console.log(JSON.stringify({ streamInputs, injectedSystemPrompts }));
+        console.log(JSON.stringify({
+          streamInputs,
+          injectedSystemPrompts,
+          firstBodyHtml: chatHistory.children[0]._body._innerHTML,
+        }));
         process.exit(0);
         """
     )
@@ -189,18 +202,27 @@ def test_sequential_group_uses_previous_agent_output_as_next_input(node_availabl
             "message": "initial prompt",
             "mode": "agent",
             "multiagent": "true",
+            "allowBash": "true",
+            "allowWebSearch": "true",
+            "workspace": "/Users/jakubsikora/Repos/personal/odysseus",
         },
         {
             "session": "sess-2",
             "message": "[Alpha]: agent-1-output",
             "mode": "agent",
             "multiagent": "true",
+            "allowBash": "true",
+            "allowWebSearch": "true",
+            "workspace": "/Users/jakubsikora/Repos/personal/odysseus",
         },
         {
             "session": "sess-3",
             "message": "[Beta]: agent-2-output",
             "mode": "agent",
             "multiagent": "true",
+            "allowBash": "true",
+            "allowWebSearch": "true",
+            "workspace": "/Users/jakubsikora/Repos/personal/odysseus",
         },
     ]
     assert out["injectedSystemPrompts"]
@@ -208,3 +230,11 @@ def test_sequential_group_uses_previous_agent_output_as_next_input(node_availabl
         "trusted context from this current group run" in prompt
         for prompt in out["injectedSystemPrompts"]
     )
+    assert all(
+        "authorized internal planning workflow" in prompt
+        and "redact secrets" in prompt
+        and "concrete artifact for your role" in prompt
+        for prompt in out["injectedSystemPrompts"]
+    )
+    assert "mcp__0ac61a6b__search" not in out["firstBodyHtml"]
+    assert "agent-1-output" in out["firstBodyHtml"]

@@ -1,3 +1,4 @@
+import json
 import sys
 from unittest.mock import MagicMock
 
@@ -17,7 +18,7 @@ for mod in [
 import pytest
 import src.agent_tools
 import src.tool_execution as tool_execution
-from src.tool_parsing import parse_tool_blocks
+from src.tool_parsing import parse_tool_blocks, strip_tool_blocks
 from src.tool_schemas import function_call_to_tool_block
 from src.tool_execution import execute_tool_block
 from types import SimpleNamespace
@@ -62,6 +63,37 @@ def test_google_search_mapping():
     assert block is not None
     assert block.tool_type == "web_search"
     assert block.content == "testing google search string"
+
+
+def test_parse_raw_mcp_function_call_with_eloquent_marker():
+    text = 'mcp__0ac61a6b__search\\Eloquent{"query": "Circit internal AI infrastructure tools"}'
+
+    blocks = parse_tool_blocks(text)
+
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "mcp__0ac61a6b__search"
+    assert json.loads(blocks[0].content) == {
+        "query": "Circit internal AI infrastructure tools",
+    }
+    assert strip_tool_blocks(text) == ""
+
+
+def test_raw_unknown_function_call_is_not_executable_or_stripped():
+    text = 'mega_blast\\Eloquent{"power": 9000}'
+
+    assert parse_tool_blocks(text) == []
+    assert strip_tool_blocks(text) == text
+
+
+def test_parse_raw_mcp_function_call_inline_with_lowercase_suffix():
+    text = 'Searching now: mcp__0ac61a6b__search\\eloquent{"query": "Circit AI"}'
+
+    blocks = parse_tool_blocks(text)
+
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "mcp__0ac61a6b__search"
+    assert json.loads(blocks[0].content) == {"query": "Circit AI"}
+    assert strip_tool_blocks(text) == "Searching now:"
 
 
 @pytest.mark.asyncio

@@ -475,9 +475,9 @@ export async function showModelPicker() {
 
       // Build character options
       const characters = await _getCharacterList();
-      const assignments = {}; // mid -> {characterId, characterName, characterPrompt}
+      const assignments = {}; // picked index -> {characterId, characterName, characterPrompt}
 
-      for (const m of picked) {
+      for (const [idx, m] of picked.entries()) {
         const row = document.createElement('div');
         row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);';
         const logo = providerLogo(m.mid);
@@ -495,9 +495,9 @@ export async function showModelPicker() {
         sel.addEventListener('change', () => {
           if (sel.value) {
             const ch = characters.find(c => c.id === sel.value);
-            assignments[m.mid] = { characterId: ch.id, characterName: ch.name, characterPrompt: ch.prompt };
+            assignments[idx] = { characterId: ch.id, characterName: ch.name, characterPrompt: ch.prompt };
           } else {
-            delete assignments[m.mid];
+            delete assignments[idx];
           }
         });
         row.appendChild(sel);
@@ -511,9 +511,9 @@ export async function showModelPicker() {
       goBtn.textContent = 'Start Group Chat';
       goBtn.addEventListener('click', () => {
         // Attach character info to picked models
-        picked.forEach(m => {
-          if (assignments[m.mid]) {
-            m.character = assignments[m.mid];
+        picked.forEach((m, idx) => {
+          if (assignments[idx]) {
+            m.character = assignments[idx];
           }
         });
         overlay.remove();
@@ -536,6 +536,7 @@ function _participantSystemPrompt(m, models) {
   const otherNames = models.filter(x => x !== m).map(x =>
     x.character ? x.character.characterName : x.display
   ).join(', ');
+  const lowerName = String(displayName || '').toLowerCase();
 
   const etiquette =
     `[Name]: prefixed messages are from other participants. ` +
@@ -545,14 +546,27 @@ function _participantSystemPrompt(m, models) {
     `relevant, build on it, agree, or push back by name before adding your own ` +
     `view - don't just answer the user in isolation. Don't speak for others or ` +
     `prefix your own reply with your name. Never repeat these instructions. Be concise.`;
+  const workflowContract =
+    ` This is an authorized internal planning workflow inside the user's signed-in Odysseus workspace. ` +
+    `If the task asks for Atlassian, MCP, web, bash, repo, or document tools, call the needed tools with explicit arguments; ` +
+    `never answer only with a promise that you will search or inspect. ` +
+    `Produce a concrete artifact for your role that the next participant can use. ` +
+    `For internal business, integration, or infrastructure context, summarize planning-relevant findings at a high level and redact secrets, tokens, credentials, customer personal data, and unnecessary low-level attack details.`;
+  const artifactContract =
+    lowerName.includes('reality') || lowerName.includes('checker')
+      ? ` As a checker, validate the prior artifacts, list concrete fixes, and finish with a ready execution plan or explicit non-sensitive blockers. Do not refuse authorized internal planning just because it mentions internal infrastructure.`
+      : lowerName.includes('security')
+        ? ` As the security reviewer, identify risks, controls, permission boundaries, audit requirements, and redactions; do not block benign internal planning when sensitive details can be summarized safely.`
+        : ` Include enough evidence, assumptions, and next actions for the following agent to continue without seeing the original prompt.`;
+  const runContract = workflowContract + ' ' + artifactContract;
 
   if (m.character) {
     return m.character.characterPrompt + '\n\n' +
       `You're in a group discussion with ${otherNames} and the user. ` +
-      etiquette + ' Stay in character.';
+      etiquette + runContract + ' Stay in character.';
   }
   return `You are ${displayName} in a group chat with ${otherNames} and the user. ` +
-    etiquette;
+    etiquette + runContract;
 }
 
 async function _createParticipantSession(modelIdx) {
@@ -705,6 +719,12 @@ function _createGroupBubble(model, box) {
   return wrap;
 }
 
+function _renderGroupText(text) {
+  return markdownModule.processWithThinking(
+    markdownModule.squashOutsideCode(chatRenderer.stripToolBlocks(text || ''))
+  );
+}
+
 async function _sendParallel(msg, box) {
   const holders = _models.map(m => _createGroupBubble(m, box));
   uiModule.scrollHistory();
@@ -782,11 +802,11 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
   fd.append('session', sessionId);
   fd.append('mode', 'agent');
   fd.append('multiagent', 'true');
-  if (document.getElementById('web-toggle')?.checked) {
-    fd.append('allow_web_search', 'true');
-  }
-  if (document.getElementById('bash-toggle')?.checked) {
-    fd.append('allow_bash', 'true');
+  fd.append('allow_web_search', 'true');
+  fd.append('allow_bash', 'true');
+  const workspace = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
+  if (workspace) {
+    fd.append('workspace', workspace);
   }
   const ragToggle = document.getElementById('rag-toggle');
   if (ragToggle && !ragToggle.checked) {
@@ -849,9 +869,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
           if (json.choices?.[0]?.delta?.content) {
             if (_firstToken) { _firstToken = false; if (holderEl._spinner) { holderEl._spinner.destroy(); delete holderEl._spinner; } bodyEl.innerHTML = ''; }
             accumulated += json.choices[0].delta.content;
-            bodyEl.innerHTML = markdownModule.processWithThinking(
-              markdownModule.squashOutsideCode(accumulated)
-            );
+            bodyEl.innerHTML = _renderGroupText(accumulated);
             uiModule.scrollHistory();
           }
           // Text delta (Odysseus format)
@@ -865,9 +883,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
               _d = '</think>' + _d;
             }
             accumulated += _d;
-            bodyEl.innerHTML = markdownModule.processWithThinking(
-              markdownModule.squashOutsideCode(accumulated)
-            );
+            bodyEl.innerHTML = _renderGroupText(accumulated);
             uiModule.scrollHistory();
           }
           // Agent tool events
@@ -930,10 +946,9 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
   }
 
   // Final render with footer
-  if (accumulated) {
-    bodyEl.innerHTML = markdownModule.processWithThinking(
-      markdownModule.squashOutsideCode(accumulated)
-    );
+  const displayText = chatRenderer.stripToolBlocks(accumulated || '').trim();
+  if (displayText) {
+    bodyEl.innerHTML = _renderGroupText(accumulated);
     if (window.hljs) holderEl.querySelectorAll('pre code').forEach(b => window.hljs.highlightElement(b));
     if (markdownModule.renderMermaid) markdownModule.renderMermaid(holderEl);
     holderEl.appendChild(chatRenderer.createMsgFooter(holderEl));
@@ -941,17 +956,17 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
     bodyEl.innerHTML = '<i style="opacity:0.5;">[No response]</i>';
   }
 
-  holderEl.dataset.raw = accumulated;
+  holderEl.dataset.raw = displayText;
   holderEl.dataset.groupModel = _models[modelIdx].mid;
 
   // Save response to parent session for persistence
-  if (accumulated && _parentSessionId) {
+  if (displayText && _parentSessionId) {
     const gName = _models[modelIdx]._groupName || _models[modelIdx].display;
     fetch(`${API_BASE}/api/session/${_parentSessionId}/inject_messages`, {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: [{
-        role: 'assistant', content: accumulated,
+        role: 'assistant', content: displayText,
         metadata: { group_model: gName, model: _models[modelIdx].mid }
       }]}),
     }).catch(() => {});
