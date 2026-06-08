@@ -1,27 +1,12 @@
-"""Webpage content fetching with caching, PDF extraction, and summarization helpers."""
+"""Compatibility wrapper for the canonical services.search.content module.
 
-import copy
-import io
-import ipaddress
-import json
-import os
-import re
-import logging
-import socket
-from datetime import datetime, timedelta
-from typing import List
-from urllib.parse import urljoin, urlparse
+``src.search.content`` stays importable for older agent/deep-research code, but the
+implementation now lives in ``services.search.content`` so the two cannot drift.
+"""
 
-import httpx
-from bs4 import BeautifulSoup
+import sys
 
-from .analytics import RateLimitError, error_logger
-from .cache import (
-    CONTENT_CACHE_DIR,
-    content_cache_index,
-    generate_cache_key,
-    cleanup_cache,
-)
+from services.search import content as _content
 
 logger = logging.getLogger(__name__)
 

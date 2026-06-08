@@ -274,7 +274,9 @@ class McpManager:
         self._sessions: Dict[str, Any] = {}
         # server_id -> exit stack (for cleanup)
         self._stacks: Dict[str, Any] = {}
-        # Tracking updates to tools/connections for RAG indexing
+        # server_id -> background connect task (HTTP transport / OAuth)
+        self._connect_tasks: Dict[str, Any] = {}
+        # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
     async def connect_server(
@@ -505,6 +507,17 @@ class McpManager:
 
     async def disconnect_server(self, server_id: str):
         """Disconnect from an MCP server."""
+        # Cancel any in-flight HTTP/OAuth background connect so it stops
+        # publishing status for a server that may be getting deleted.
+        task = self._connect_tasks.pop(server_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        try:
+            from src.mcp_oauth import clear_auth_url
+            clear_auth_url(server_id)
+        except Exception:
+            pass
+
         stack = self._stacks.pop(server_id, None)
         if stack:
             try:
@@ -958,6 +971,7 @@ class McpManager:
                     "name": tool["name"],
                     "qualified_name": f"mcp__{server_id}__{tool['name']}",
                     "description": tool.get("description", ""),
+                    "input_schema": tool.get("input_schema") or {},
                     "is_disabled": tool["name"] in disabled,
                 })
         return result
@@ -1021,7 +1035,11 @@ class McpManager:
             for t in server_tools:
                 # Truncate long descriptions
                 desc = t['description'][:120] + '...' if len(t['description']) > 120 else t['description']
-                lines.append(f"  - {t['qualified_name']}: {desc}")
+                # Include the tool's declared inputs so the model calls it with
+                # real argument names instead of guessing from the description
+                # alone (issue #2509).
+                args_hint = _format_mcp_params(t.get("input_schema"))
+                lines.append(f"  - {t['qualified_name']}: {desc}{args_hint}")
 
         result = "\n".join(lines)
         self._cached_prompt_desc = result

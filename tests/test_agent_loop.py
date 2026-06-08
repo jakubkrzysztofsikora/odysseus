@@ -5,16 +5,15 @@ import sys
 import collections
 from unittest.mock import MagicMock
 
-# Mock heavy dependencies before importing
-for mod in [
+_MOCKED_IMPORTS = [
     'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
     'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
     'src.database',
     'src.agent_tools',
     'core.models', 'core.database',
-]:
-    if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
+]
+_INJECTED_IMPORT_STUBS = {}
+_PREEXISTING_AGENT_LOOP = sys.modules.get("src.agent_loop")
 
 from src.agent_loop import (
     _detect_admin_intent,
