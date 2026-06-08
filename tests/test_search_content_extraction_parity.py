@@ -5,6 +5,7 @@ import pytest
 
 pytest.importorskip("bs4")
 
+from src.search import content as src_content
 from services.search import content as service_content
 
 
