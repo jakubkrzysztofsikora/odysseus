@@ -10,6 +10,7 @@ import copy
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -72,6 +73,48 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
         )
 
     return raw_error
+
+
+# Caps for rendering untrusted MCP tool schemas into the agent prompt.
+_MCP_PARAM_MAX = 12
+_MCP_TOKEN_MAX = 40
+_MCP_HINT_MAX = 300
+
+
+def _sanitize_schema_token(value: Any, limit: int = _MCP_TOKEN_MAX) -> str:
+    """Make an untrusted JSON-Schema token safe to splice into the prompt."""
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value))
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "..."
+    return text
+
+
+def _format_mcp_params(input_schema: Any) -> str:
+    """Render an MCP tool's JSON-Schema inputs as a compact prompt hint."""
+    if not isinstance(input_schema, dict):
+        return ""
+    props = input_schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return ""
+    required = set(input_schema.get("required") or [])
+    parts = []
+    for pname, pinfo in list(props.items())[:_MCP_PARAM_MAX]:
+        pinfo = pinfo if isinstance(pinfo, dict) else {}
+        ptype = pinfo.get("type") or "any"
+        if isinstance(ptype, list):
+            ptype = "|".join(str(x) for x in ptype)
+        tag = f'"{_sanitize_schema_token(pname)}": {_sanitize_schema_token(ptype)}'
+        if pname in required:
+            tag += " (required)"
+        parts.append(tag)
+    extra = len(props) - len(parts)
+    if extra > 0:
+        parts.append(f"...+{extra} more")
+    hint = " Args (JSON): {" + ", ".join(parts) + "}"
+    if len(hint) > _MCP_HINT_MAX:
+        hint = hint[:_MCP_HINT_MAX - 3].rstrip() + "..."
+    return hint
 
 
 def _exception_text(error: BaseException) -> str:
