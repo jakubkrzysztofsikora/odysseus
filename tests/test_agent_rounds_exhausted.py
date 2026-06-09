@@ -34,6 +34,7 @@ def _patch_common(monkeypatch):
     # _resolve_tool_blocks, and parse_tool_blocks.
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda _owner: set(), raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
 
     async def _fake_exec(block, *a, **k):
@@ -70,7 +71,7 @@ def test_no_rounds_exhausted_on_normal_finish(monkeypatch):
     assert not any(e.get("type") == "rounds_exhausted" for e in events), events
 
 
-def test_chatgpt_route_does_not_receive_native_mcp_schemas(monkeypatch):
+def test_chatgpt_route_receives_native_mcp_schemas(monkeypatch):
     _patch_common(monkeypatch)
     captured_tools = []
 
@@ -112,4 +113,5 @@ def test_chatgpt_route_does_not_receive_native_mcp_schemas(monkeypatch):
     events = _types(_collect(gen))
 
     assert not any(e.get("type") == "rounds_exhausted" for e in events), events
-    assert captured_tools == [None]
+    assert captured_tools and captured_tools[0]
+    assert captured_tools[0][0]["function"]["name"] == "mcp__remote__search"

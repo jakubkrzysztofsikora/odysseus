@@ -28,7 +28,9 @@ from src.agent_loop import (
     _prompt_visible_mcp_tools,
     _build_mcp_target_message,
     _record_empty_argument_tool_call,
+    _resolve_tool_blocks,
     _repair_empty_mcp_search_tool_blocks,
+    _repair_empty_local_tool_blocks,
     ToolBlock,
 )
 from src.tool_parsing import parse_tool_blocks
@@ -173,13 +175,13 @@ class TestMcpToolVisibility:
 
         assert tools == {"api_call"}
 
-    def test_chatgpt_route_does_not_get_native_mcp_schemas_by_default(self):
+    def test_chatgpt_route_can_get_native_mcp_schemas_when_mcp_requested(self):
         assert _allow_native_tool_schemas_for_non_api_model(
             "chatgpt/gpt-5.5",
             None,
             self._schemas(),
             "use atlassian mcp to search Circit context",
-        ) is False
+        ) is True
 
     def test_chatgpt_route_can_opt_into_native_mcp_schemas(self):
         assert _allow_native_tool_schemas_for_non_api_model(
@@ -421,6 +423,18 @@ class TestMcpSearchArgumentRepair:
             "query": "Use Atlassian MCP to fetch Circit AI business context"
         }
 
+    def test_native_empty_mcp_search_args_are_repaired_before_dispatch(self):
+        messages = [{"role": "user", "content": "Use Atlassian MCP to search Circit AI usage patterns"}]
+        native = [{"id": "call_1", "name": "mcp__0ac61a6b__search", "arguments": "{}"}]
+        blocks, used_native = _resolve_tool_blocks("", native, 1)
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, None, messages)
+
+        assert used_native is True
+        assert json.loads(repaired[0].content) == {
+            "query": "Use Atlassian MCP to search Circit AI usage patterns"
+        }
+
     def test_non_search_mcp_tool_is_not_repaired_without_live_schema(self):
         messages = [{"role": "user", "content": "Create a Jira issue for the launch plan"}]
         blocks = [ToolBlock("mcp__atlassian__createIssue", "{}")]
@@ -434,6 +448,49 @@ class TestMcpSearchArgumentRepair:
         blocks = [ToolBlock("mcp__atlassian__createIssue", "{}")]
 
         repaired = _repair_empty_mcp_search_tool_blocks(blocks, self.DummyMcp(), messages)
+
+        assert repaired == blocks
+
+
+class TestLocalToolArgumentRepair:
+    def test_empty_bash_args_are_filled_from_explicit_latest_user_command(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "First use MCP. After that call bash with command exactly: "
+                    "printf 'SMOKE bash-ok'. Then answer."
+                ),
+            },
+            {"role": "user", "content": "[Tool execution results]\n\nprevious output"},
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].tool_type == "bash"
+        assert repaired[0].content == "printf 'SMOKE bash-ok'"
+
+    def test_native_empty_bash_args_are_repaired_before_dispatch(self):
+        messages = [
+            {
+                "role": "user",
+                "content": "Run bash with command exactly: printf 'SMOKE native-bash-ok'.",
+            }
+        ]
+        native = [{"id": "call_1", "name": "bash", "arguments": "{}"}]
+        blocks, used_native = _resolve_tool_blocks("", native, 1)
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert used_native is True
+        assert repaired[0].content == "printf 'SMOKE native-bash-ok'"
+
+    def test_empty_bash_args_are_not_repaired_without_explicit_command(self):
+        messages = [{"role": "user", "content": "Use bash if needed to inspect the repo"}]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
 
         assert repaired == blocks
 

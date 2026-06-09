@@ -740,11 +740,10 @@ async def _wait_for_requested_mcp_tools(
 ) -> float:
     """Briefly wait for startup MCP connections before freezing the prompt.
 
-    Text-tool models (including chatgpt/* subscription routes) rely on the MCP
-    tool list in the prompt because we intentionally do not send native MCP
-    schemas to them. If a request lands during app startup, building the prompt
-    a few hundred milliseconds too early makes those models improvise malformed
-    raw JSON instead of valid MCP calls.
+    Text-tool fallback models rely on the MCP tool list in the prompt when they
+    do not receive native MCP schemas. If a request lands during app startup,
+    building the prompt a few hundred milliseconds too early makes those models
+    improvise malformed raw JSON instead of valid MCP calls.
     """
     if not mcp_mgr or not _mcp_prompt_requested(query, force_all_mcp_tools):
         return 0.0
@@ -1349,14 +1348,10 @@ def _allow_native_tool_schemas_for_non_api_model(
 ) -> bool:
     """Whether a fenced/text-tool model may still receive native MCP schemas.
 
-    Some routes are deliberately forced off native tools even though the model
-    name looks tool-capable. `chatgpt/*` through LiteLLM's subscription routes
-    is one of those: logs show it repeatedly emits the right MCP tool name with
-    `{}` arguments. It still has MCP access through the prompt/raw-text parser,
-    so do not send native schemas unless the endpoint is explicitly overridden.
+    Local/non-API routes still mostly use fenced blocks, but when the user is
+    clearly asking for MCP access we can expose MCP schemas and keep the
+    missing-argument repair/retry guard as the safety net.
     """
-    if endpoint_supports is not True and (model or "").lower().startswith("chatgpt/"):
-        return False
     _last_content = (last_user or "").lower()
     return bool(mcp_schemas) and any(kw in _last_content for kw in _MCP_KEYWORDS)
 
@@ -1499,6 +1494,59 @@ def _repair_empty_mcp_search_tool_blocks(
         )
         repaired.append(ToolBlock(tool_type, json.dumps(fixed)))
 
+    return repaired
+
+
+def _extract_explicit_bash_command(text: str) -> str:
+    """Extract a user-specified shell command from an explicit instruction."""
+    source = re.sub(r"\s+", " ", text or "").strip()
+    if not source:
+        return ""
+    patterns = (
+        r"(?:bash|shell)[^.]{0,180}?\bcommand exactly\s*:\s*(.+?)(?=(?:\.\s+[A-Z])|$)",
+        r"(?:bash|shell)[^.]{0,180}?\bcommand\s*:\s*(.+?)(?=(?:\.\s+[A-Z])|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, source, flags=re.IGNORECASE)
+        if not match:
+            continue
+        command = match.group(1).strip()
+        if command.endswith("."):
+            command = command[:-1].rstrip()
+        if len(command) >= 2 and command[0] == command[-1] and command[0] in {"'", '"', "`"}:
+            command = command[1:-1].strip()
+        if command and len(command) <= 1000:
+            return command
+    return ""
+
+
+def _repair_empty_local_tool_blocks(tool_blocks: list, messages: List[Dict]) -> list:
+    """Repair empty native calls for local tools when the user gave exact args.
+
+    GPT subscription routes can emit a native `bash` call with `{}` even when
+    the user instruction contains the exact command. Fill only that explicit
+    shape; otherwise keep the normal missing-argument guard.
+    """
+    if not tool_blocks:
+        return tool_blocks
+
+    repaired = []
+    bash_command = ""
+    for block in tool_blocks:
+        tool_type = getattr(block, "tool_type", "")
+        content = getattr(block, "content", "")
+        if tool_type != "bash" or str(content or "").strip():
+            repaired.append(block)
+            continue
+        if not bash_command:
+            bash_command = _extract_explicit_bash_command(
+                _latest_user_text_for_tool_repair(messages, max_chars=800)
+            )
+        if not bash_command:
+            repaired.append(block)
+            continue
+        logger.warning("Repaired empty bash arguments with explicit latest user command")
+        repaired.append(ToolBlock("bash", bash_command))
     return repaired
 
 
@@ -1953,11 +2001,6 @@ async def stream_agent_loop(
     # and can override this list for users who know their setup.
     _model_no_tools = any(kw in _model_lc for kw in (
         "deepseek-r1",
-        # LiteLLM's ChatGPT subscription/Responses routes can emit a native
-        # tool-call name but return empty arguments for strict JSON schemas.
-        # Use Odysseus' fenced tool protocol unless the endpoint is explicitly
-        # overridden to native tools.
-        "chatgpt/",
     ))
     # Native Ollama endpoints (/api/chat) handle tool schemas differently from
     # the OpenAI-compat path. Models like gemma4, qwen3.5, ministral respond to
@@ -2382,6 +2425,7 @@ async def stream_agent_loop(
 
         tool_blocks, used_native = _resolve_tool_blocks(round_response, native_tool_calls, round_num)
         tool_blocks = _repair_empty_mcp_search_tool_blocks(tool_blocks, mcp_mgr, messages)
+        tool_blocks = _repair_empty_local_tool_blocks(tool_blocks, messages)
 
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
