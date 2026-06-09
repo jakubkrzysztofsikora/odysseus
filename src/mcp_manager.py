@@ -891,26 +891,27 @@ class McpManager:
         if len(parts) != 3 or parts[0] != "mcp":
             return {"error": f"Invalid MCP tool name: {qualified_name}", "exit_code": 1}
 
-        server_id = parts[1]
-        tool_name = parts[2]
+        server_id = self._canonical_server_id(parts[1])
+        tool_name = self._canonical_tool_name(server_id, parts[2])
 
         session = self._sessions.get(server_id)
         if not session:
             return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
 
-        arguments = self.coerce_tool_arguments(qualified_name, arguments)
-        missing = self.missing_required_arguments(qualified_name, arguments)
+        canonical_name = f"mcp__{server_id}__{tool_name}"
+        arguments = self.coerce_tool_arguments(canonical_name, arguments)
+        missing = self.missing_required_arguments(canonical_name, arguments)
         if missing:
-            example = self.required_argument_example(qualified_name, missing)
+            example = self.required_argument_example(canonical_name, missing)
             logger.warning(
                 "MCP tool called with missing required arguments: %s missing=%s args=%r",
-                qualified_name,
+                canonical_name,
                 missing,
                 arguments,
             )
             return {
                 "error": (
-                    f"Tool '{qualified_name}' was called with empty or missing required "
+                    f"Tool '{canonical_name}' was called with empty or missing required "
                     f"argument(s): {', '.join(missing)}. Retry with a JSON object like "
                     f"{json.dumps(example)}. Do not say you are blocked until a correctly "
                     "populated tool call has also failed."
@@ -926,7 +927,7 @@ class McpManager:
             err_text = _exception_text(e)
             # Auto-reconnect for builtin servers whose subprocess may have died
             if self.is_builtin(server_id):
-                logger.warning("MCP call failed for %s, attempting reconnect: %s", qualified_name, err_text)
+                logger.warning("MCP call failed for %s, attempting reconnect: %s", canonical_name, err_text)
                 reconnected = await self._reconnect_builtin(server_id)
                 if reconnected:
                     session = self._sessions.get(server_id)
@@ -935,7 +936,7 @@ class McpManager:
                             result = await self._do_call(session, tool_name, arguments)
                         except Exception as e2:
                             err2_text = _exception_text(e2)
-                            logger.error("MCP tool call failed after reconnect: %s: %s", qualified_name, err2_text)
+                            logger.error("MCP tool call failed after reconnect: %s: %s", canonical_name, err2_text)
                             return {"error": err2_text, "exit_code": 1}
                     else:
                         return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
@@ -943,7 +944,7 @@ class McpManager:
                     logger.error(f"MCP reconnect failed for {server_id}")
                     return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
             else:
-                logger.warning("MCP call failed for %s, attempting reconnect: %s", qualified_name, err_text)
+                logger.warning("MCP call failed for %s, attempting reconnect: %s", canonical_name, err_text)
                 reconnected = await self._reconnect_configured_server(server_id)
                 if reconnected:
                     session = self._sessions.get(server_id)
@@ -952,7 +953,7 @@ class McpManager:
                             result = await self._do_call(session, tool_name, arguments)
                         except Exception as e2:
                             err2_text = _exception_text(e2)
-                            logger.error("MCP tool call failed after reconnect: %s: %s", qualified_name, err2_text)
+                            logger.error("MCP tool call failed after reconnect: %s: %s", canonical_name, err2_text)
                             return {"error": err2_text, "exit_code": 1}
                     else:
                         return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
@@ -962,7 +963,29 @@ class McpManager:
 
         return result
 
+    def _canonical_server_id(self, server_id: str) -> str:
+        if server_id in self._sessions or server_id in self._tools:
+            return server_id
+        wanted = str(server_id or "").lower()
+        for candidate in list(self._sessions.keys()) + list(self._tools.keys()):
+            if str(candidate).lower() == wanted:
+                return str(candidate)
+        return server_id
+
+    def _canonical_tool_name(self, server_id: str, tool_name: str) -> str:
+        tools = self._tools.get(server_id, [])
+        if any(tool.get("name") == tool_name for tool in tools):
+            return tool_name
+        wanted = str(tool_name or "").lower()
+        for tool in tools:
+            candidate = str(tool.get("name") or "")
+            if candidate.lower() == wanted:
+                return candidate
+        return tool_name
+
     def _input_schema_for_tool(self, server_id: str, tool_name: str) -> Dict[str, Any]:
+        server_id = self._canonical_server_id(server_id)
+        tool_name = self._canonical_tool_name(server_id, tool_name)
         for tool in self._tools.get(server_id, []):
             if tool.get("name") == tool_name:
                 schema = tool.get("input_schema") or {}

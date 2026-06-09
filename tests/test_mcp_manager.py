@@ -538,6 +538,64 @@ def test_call_tool_rejects_missing_required_arguments_before_network(monkeypatch
     assert '{"query": "..."}' in result["error"]
 
 
+def test_missing_required_arguments_resolves_mcp_name_case_insensitively():
+    mgr = McpManager()
+    mgr._sessions["Atlassian"] = object()
+    mgr._tools["Atlassian"] = [
+        {
+            "name": "SearchJiraIssuesUsingJql",
+            "description": "Search Jira",
+            "input_schema": {
+                "type": "object",
+                "properties": {"jql": {"type": "string"}},
+                "required": ["jql"],
+            },
+        }
+    ]
+
+    assert mgr.missing_required_arguments(
+        "mcp__ATLASSIAN__searchjiraissuesusingjql",
+        {},
+    ) == ["jql"]
+
+
+def test_call_tool_uses_canonical_mcp_tool_name_case_insensitively(monkeypatch):
+    mgr = McpManager()
+    session = object()
+    mgr._sessions["Atlassian"] = session
+    mgr._tools["Atlassian"] = [
+        {
+            "name": "SearchJiraIssuesUsingJql",
+            "description": "Search Jira",
+            "input_schema": {
+                "type": "object",
+                "properties": {"jql": {"type": "string"}},
+                "required": ["jql"],
+            },
+        }
+    ]
+    captured = {}
+
+    async def fake_do_call(call_session, tool_name, arguments):
+        captured["session"] = call_session
+        captured["tool_name"] = tool_name
+        captured["arguments"] = arguments
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(mgr, "_do_call", fake_do_call)
+
+    result = asyncio.run(
+        mgr.call_tool("mcp__atlassian__searchjiraissuesusingjql", {"jql": "project = ABC"})
+    )
+
+    assert result == {"content": [{"type": "text", "text": "ok"}]}
+    assert captured == {
+        "session": session,
+        "tool_name": "SearchJiraIssuesUsingJql",
+        "arguments": {"jql": "project = ABC"},
+    }
+
+
 def test_coerce_tool_arguments_maps_scalar_to_single_required_arg():
     mgr = McpManager()
     mgr._tools["remote"] = [

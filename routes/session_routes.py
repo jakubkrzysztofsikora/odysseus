@@ -327,7 +327,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         important: str = Form(None),
     ):
         skip_val = str(skip_validation).lower() == "true"
-        user = get_current_user(request)
+        user = effective_user(request)
         endpoint_api_key = ""
         endpoint_base_url = ""
         _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
@@ -476,7 +476,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                 db.close()
         # Switch model/endpoint mid-session
         if model is not None and endpoint_url is not None:
-            user = get_current_user(request)
+            user = effective_user(request)
             _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
             endpoint_api_key = ""
             endpoint_base_url = ""

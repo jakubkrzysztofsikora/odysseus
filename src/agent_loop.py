@@ -1416,6 +1416,16 @@ def _json_object_from_tool_content(content: str) -> Dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _is_blank_tool_value(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return not value
+    return False
+
+
 def _repair_empty_mcp_search_tool_blocks(
     tool_blocks: list,
     mcp_mgr,
@@ -1429,7 +1439,7 @@ def _repair_empty_mcp_search_tool_blocks(
     required arguments; arbitrary MCP tools keep the normal missing-argument
     rejection path.
     """
-    if not mcp_mgr or not tool_blocks:
+    if not tool_blocks:
         return tool_blocks
 
     repair_query = ""
@@ -1441,21 +1451,36 @@ def _repair_empty_mcp_search_tool_blocks(
             continue
 
         args = _json_object_from_tool_content(getattr(block, "content", ""))
+        name_lc = str(tool_type).lower()
         try:
-            missing = mcp_mgr.missing_required_arguments(tool_type, args)
+            missing = mcp_mgr.missing_required_arguments(tool_type, args) if mcp_mgr else []
         except Exception:
             missing = []
-        if not missing:
-            repaired.append(block)
-            continue
 
-        name_lc = str(tool_type).lower()
         missing_search_args = [
             str(name)
             for name in missing
             if str(name).lower() in _MCP_SEARCH_ARGUMENT_NAMES
         ]
-        if not missing_search_args or "search" not in name_lc:
+
+        if not missing_search_args and name_lc.endswith("__search"):
+            if not args:
+                missing_search_args = ["query"]
+            else:
+                blank_search_keys = [
+                    key
+                    for key, value in args.items()
+                    if str(key).lower() in _MCP_SEARCH_ARGUMENT_NAMES
+                    and _is_blank_tool_value(value)
+                ]
+                if blank_search_keys:
+                    missing_search_args = [str(key) for key in blank_search_keys]
+
+        if not missing_search_args:
+            repaired.append(block)
+            continue
+
+        if "search" not in name_lc:
             repaired.append(block)
             continue
 

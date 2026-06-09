@@ -91,6 +91,26 @@ class TestTrimForContext:
         assert "pasted message was too large" in trimmed[-1]["content"]
         assert "old-0" not in "\n".join(str(m.get("content", "")) for m in trimmed)
 
+    def test_keeps_protected_mcp_target_message_when_trimming(self):
+        messages = [
+            {"role": "system", "content": "Base tool prompt. " * 2000},
+            {
+                "role": "system",
+                "content": 'MCP TARGET TOOLS FOR THIS REQUEST:\n- mcp__0ac61a6b__search{"query":"real non-empty value"}',
+                "_protected": True,
+            },
+            {"role": "user", "content": "old context " * 1000},
+            {"role": "user", "content": "Use Atlassian MCP to search Circit AI"},
+        ]
+
+        trimmed = trim_for_context(messages, context_length=2048, reserve_tokens=512)
+
+        assert any(
+            m.get("_protected")
+            and "mcp__0ac61a6b__search" in (m.get("content") or "")
+            for m in trimmed
+        )
+
 
 class TestContentAsText:
     def test_string_passthrough(self):
@@ -131,7 +151,7 @@ class TestMaybeCompactFourthMessage:
         async def _fake_summary(*a, **k):
             return "compact summary text"
 
-        cc.get_context_length = lambda url, model: context_length
+        cc.get_context_length = lambda url, model, **kwargs: context_length
         cc.llm_call_async = _fake_summary
         cc.resolve_endpoint = lambda which: (None, None, None)
         cc._update_session_history = lambda *a, **k: None

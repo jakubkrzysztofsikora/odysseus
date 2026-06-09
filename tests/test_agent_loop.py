@@ -390,6 +390,34 @@ class TestMcpSearchArgumentRepair:
             "query": "Find Circit Copilot usage patterns"
         }
 
+    def test_empty_mcp_search_args_are_repaired_without_live_schema(self):
+        messages = [{"role": "user", "content": "Search Atlassian for Circit support AI usage"}]
+        blocks = [ToolBlock("mcp__0ac61a6b__search", "{}")]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, None, messages)
+
+        assert json.loads(repaired[0].content) == {
+            "query": "Search Atlassian for Circit support AI usage"
+        }
+
+    def test_blank_mcp_search_query_is_repaired_without_live_schema(self):
+        messages = [{"role": "user", "content": "Find Circit compliance AI roadmap"}]
+        blocks = [ToolBlock("mcp__0ac61a6b__search", '{"query":""}')]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, None, messages)
+
+        assert json.loads(repaired[0].content) == {
+            "query": "Find Circit compliance AI roadmap"
+        }
+
+    def test_non_search_mcp_tool_is_not_repaired_without_live_schema(self):
+        messages = [{"role": "user", "content": "Create a Jira issue for the launch plan"}]
+        blocks = [ToolBlock("mcp__atlassian__createIssue", "{}")]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, None, messages)
+
+        assert repaired == blocks
+
     def test_non_search_mcp_tools_keep_missing_argument_guard(self):
         messages = [{"role": "user", "content": "Create a Jira issue for the launch plan"}]
         blocks = [ToolBlock("mcp__atlassian__createIssue", "{}")]
