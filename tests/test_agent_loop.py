@@ -3,6 +3,7 @@ and _append_tool_results. Uses mock imports to avoid loading the full app stack.
 
 import sys
 import collections
+import json
 from unittest.mock import MagicMock
 
 _MOCKED_IMPORTS = [
@@ -27,6 +28,8 @@ from src.agent_loop import (
     _prompt_visible_mcp_tools,
     _build_mcp_target_message,
     _record_empty_argument_tool_call,
+    _repair_empty_mcp_search_tool_blocks,
+    ToolBlock,
 )
 
 
@@ -351,6 +354,49 @@ class TestEmptyArgumentToolQuarantine:
 
         assert note is None
         assert disabled == set()
+
+
+class TestMcpSearchArgumentRepair:
+    class DummyMcp:
+        def missing_required_arguments(self, qualified_name, args):
+            if qualified_name == "mcp__atlassian__search" and not str(args.get("query") or "").strip():
+                return ["query"]
+            if qualified_name == "mcp__atlassian__createIssue" and not args.get("summary"):
+                return ["summary"]
+            return []
+
+    def test_empty_mcp_search_args_are_filled_from_latest_user_instruction(self):
+        messages = [
+            {"role": "user", "content": "Use Atlassian MCP to search Circit AI internal infrastructure"},
+            {"role": "assistant", "content": "working"},
+            {"role": "user", "content": "[Tool execution results]\n\nprevious output"},
+        ]
+        blocks = [ToolBlock("mcp__atlassian__search", "{}")]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, self.DummyMcp(), messages)
+
+        assert repaired[0].tool_type == "mcp__atlassian__search"
+        assert json.loads(repaired[0].content) == {
+            "query": "Use Atlassian MCP to search Circit AI internal infrastructure"
+        }
+
+    def test_blank_mcp_search_args_are_repaired(self):
+        messages = [{"role": "user", "content": "Find Circit Copilot usage patterns"}]
+        blocks = [ToolBlock("mcp__atlassian__search", '{"query":"   "}')]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, self.DummyMcp(), messages)
+
+        assert json.loads(repaired[0].content) == {
+            "query": "Find Circit Copilot usage patterns"
+        }
+
+    def test_non_search_mcp_tools_keep_missing_argument_guard(self):
+        messages = [{"role": "user", "content": "Create a Jira issue for the launch plan"}]
+        blocks = [ToolBlock("mcp__atlassian__createIssue", "{}")]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, self.DummyMcp(), messages)
+
+        assert repaired == blocks
 
 
 # ---------------------------------------------------------------------------

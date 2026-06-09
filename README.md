@@ -414,7 +414,9 @@ For hosted MCP servers, use the `HTTP` transport in Settings. This maps to the M
 
 The OAuth callback endpoint is `/api/mcp/oauth/callback`. If the provider redirects to a localhost URL that your browser cannot complete, copy the full callback URL from the browser address bar and paste it into the Odysseus authorization page.
 
-For chat-style models that do not receive native MCP schemas, Odysseus waits briefly for requested MCP servers to finish connecting before it builds the agent prompt. Those models are prompted to emit MCP calls as raw lines like `mcp__server_id__tool_name{"required_arg":"real value"}`; empty `{}` calls and blank required arguments are rejected instead of being forwarded.
+Remote MCP OAuth access tokens are refreshed during headless startup/reconnect when a refresh token is available. Odysseus discovers the MCP protected-resource metadata before refresh so providers such as Atlassian use the authorization server's token endpoint; if refresh fails, the server is marked as requiring authorization instead of attempting an interactive browser grant in the background.
+
+For chat-style models that do not receive native MCP schemas, Odysseus waits briefly for requested MCP servers to finish connecting before it builds the agent prompt. Those models are prompted to emit MCP calls as raw lines like `mcp__server_id__tool_name{"required_arg":"real value"}`; empty `{}` calls and blank required arguments are rejected instead of being forwarded. If a raw MCP search call still arrives with a missing query argument, Odysseus repairs that search query from the latest real user/workflow instruction before dispatching it.
 
 ### Group agent workflows
 

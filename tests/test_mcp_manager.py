@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import json
 import os
 import time
@@ -6,8 +7,11 @@ import sys
 from types import SimpleNamespace
 
 from src.mcp_manager import (
+    FileTokenStorage,
     McpManager,
     _format_mcp_connection_error,
+    _oauth_access_token_expired,
+    _oauth_authorization_required_error,
     _oauth_token_expired,
     _skip_interactive_mcp_remote_startup,
     _startup_mcp_remote_args,
@@ -111,6 +115,209 @@ def test_oauth_token_expired_false_for_fresh_expires_in(tmp_path):
     token_file.write_text(json.dumps({"expires_in": 3600}))
 
     assert _oauth_token_expired(str(token_file)) is False
+
+
+def test_oauth_token_expired_false_for_refreshable_expired_token(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({
+        "access_token": "stale",
+        "refresh_token": "refreshable",
+        "expires_at": time.time() - 10,
+    }))
+
+    assert _oauth_token_expired(str(token_file)) is False
+
+
+def test_oauth_access_token_expired_tracks_refreshable_stale_token(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({
+        "access_token": "stale",
+        "refresh_token": "refreshable",
+        "expires_at": time.time() - 10,
+    }))
+
+    assert _oauth_access_token_expired(str(token_file)) is True
+    assert FileTokenStorage(str(token_file)).access_token_expired() is True
+
+
+def test_oauth_authorization_required_error_detects_sdk_headless_failure():
+    assert _oauth_authorization_required_error(
+        RuntimeError("No redirect handler provided for authorization code grant")
+    )
+    assert _oauth_authorization_required_error(
+        RuntimeError("Client error '401 Unauthorized' for url 'https://example.test/mcp'")
+    )
+
+
+def test_headless_oauth_provider_used_without_callback_handlers(tmp_path):
+    token_file = tmp_path / "token.json"
+    mgr = McpManager()
+
+    auth = mgr._build_oauth_auth(
+        "https://example.test/mcp",
+        {"token_file": str(token_file)},
+    )
+
+    assert auth.__class__.__name__ == "HeadlessOAuthClientProvider"
+
+
+def test_interactive_oauth_provider_keeps_callback_handlers(tmp_path):
+    token_file = tmp_path / "token.json"
+    mgr = McpManager()
+
+    async def redirect_handler(_url):
+        pass
+
+    async def callback_handler():
+        return "code", "state"
+
+    auth = mgr._build_oauth_auth(
+        "https://example.test/mcp",
+        {
+            "token_file": str(token_file),
+            "_redirect_handler": redirect_handler,
+            "_callback_handler": callback_handler,
+        },
+    )
+
+    assert auth.__class__.__name__ == "OAuthClientProvider"
+
+
+def test_headless_oauth_provider_refreshes_expired_file_token_before_request(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({
+        "access_token": "stale",
+        "refresh_token": "refreshable",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "expires_at": time.time() - 10,
+    }))
+    client_file = tmp_path / "token_client.json"
+    client_file.write_text(json.dumps({
+        "redirect_uris": ["http://localhost:7860/api/mcp/oauth/callback"],
+        "client_id": "client-123",
+        "token_endpoint_auth_method": "none",
+    }))
+
+    auth = McpManager()._build_oauth_auth(
+        "https://example.test/mcp",
+        {"token_file": str(token_file)},
+    )
+
+    async def run_flow():
+        request = httpx.Request("POST", "https://example.test/mcp")
+        flow = auth.async_auth_flow(request)
+
+        prm_request = await anext(flow)
+        assert "oauth-protected-resource" in str(prm_request.url)
+        asm_request = await flow.asend(httpx.Response(
+            200,
+            json={
+                "resource": "https://example.test",
+                "authorization_servers": ["https://auth.example.test"],
+            },
+            request=prm_request,
+        ))
+        assert str(asm_request.url).startswith("https://auth.example.test/")
+
+        refresh_request = await flow.asend(httpx.Response(
+            200,
+            json={
+                "issuer": "https://auth.example.test",
+                "authorization_endpoint": "https://auth.example.test/authorize",
+                "token_endpoint": "https://auth.example.test/token",
+            },
+            request=asm_request,
+        ))
+        assert refresh_request.url == "https://auth.example.test/token"
+        assert b"grant_type=refresh_token" in refresh_request.content
+
+        authed_request = await flow.asend(httpx.Response(
+            200,
+            json={"access_token": "fresh", "token_type": "Bearer", "expires_in": 3600},
+            request=refresh_request,
+        ))
+        assert authed_request.headers["Authorization"] == "Bearer fresh"
+
+        try:
+            await flow.asend(httpx.Response(202, request=authed_request))
+        except StopAsyncIteration:
+            return
+        raise AssertionError("headless auth flow should finish after MCP response")
+
+    asyncio.run(run_flow())
+
+
+def test_headless_oauth_preflight_refreshes_before_stream_client(monkeypatch, tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({
+        "access_token": "stale",
+        "refresh_token": "refreshable",
+        "token_type": "Bearer",
+        "expires_at": time.time() - 10,
+    }))
+    mgr = McpManager()
+    sent_urls = []
+
+    class FakeAuth:
+        async def async_auth_flow(self, original_request):
+            metadata_request = httpx.Request("GET", "https://example.test/.well-known/oauth-protected-resource/mcp")
+            yield metadata_request
+            refresh_request = httpx.Request("POST", "https://auth.example.test/token")
+            yield refresh_request
+            original_request.headers["Authorization"] = "Bearer fresh"
+            yield original_request
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def send(self, request):
+            sent_urls.append(str(request.url))
+            return httpx.Response(200, request=request)
+
+    monkeypatch.setattr(mgr, "_build_oauth_auth", lambda *_args, **_kwargs: FakeAuth())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    asyncio.run(mgr._refresh_headless_oauth_if_needed(
+        "https://example.test/mcp",
+        {"token_file": str(token_file)},
+    ))
+
+    assert sent_urls == [
+        "https://example.test/.well-known/oauth-protected-resource/mcp",
+        "https://auth.example.test/token",
+    ]
+
+
+def test_connect_server_marks_headless_oauth_failure_needs_oauth(monkeypatch, tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(json.dumps({"access_token": "stale", "token_type": "Bearer"}))
+    mgr = McpManager()
+
+    async def fail_connect(*_args, **_kwargs):
+        raise RuntimeError("No redirect handler provided for authorization code grant")
+
+    monkeypatch.setattr(mgr, "_connect_streamable_http", fail_connect)
+
+    result = asyncio.run(mgr.connect_server(
+        server_id="remote",
+        name="Remote OAuth",
+        transport="streamable_http",
+        url="https://example.test/mcp",
+        oauth_config={"token_file": str(token_file)},
+    ))
+
+    assert result is False
+    status = mgr.get_server_status("remote")
+    assert status["status"] == "needs_oauth"
+    assert "OAuth authorization required" in status["error"]
 
 
 class _FakeQuery:

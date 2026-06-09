@@ -75,6 +75,18 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
     return raw_error
 
 
+def _oauth_authorization_required_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return (
+        "authorization required" in text
+        or "authorization code grant" in text
+        or "no redirect handler" in text
+        or "no callback handler" in text
+        or "401 unauthorized" in text
+        or "403 forbidden" in text
+    )
+
+
 # Caps for rendering untrusted MCP tool schemas into the agent prompt.
 _MCP_PARAM_MAX = 12
 _MCP_TOKEN_MAX = 40
@@ -244,13 +256,39 @@ def _example_for_schema(schema: Any) -> Any:
 
 
 def _oauth_token_expired(token_file: str, skew_seconds: int = 60) -> bool:
-    """Best-effort expiry check for MCP OAuth token files.
+    """Best-effort check for OAuth tokens that cannot refresh themselves.
 
     The MCP SDK writes OAuthToken JSON that may include expires_in without an
     absolute issued/expires timestamp. In that case use the token file mtime as
-    issued_at so app startup does not try an obviously stale token and trigger
-    an interactive OAuth flow with no redirect handler.
+    issued_at. Tokens with a refresh_token are allowed through so the SDK can
+    refresh them during headless startup/reconnect; if refresh fails, the MCP
+    manager marks the server as needing OAuth.
     """
+    if not token_file or not os.path.exists(token_file):
+        return False
+    try:
+        with open(token_file) as f:
+            data = json.load(f)
+    except Exception:
+        return False
+
+    now = time.time()
+    can_refresh = bool(data.get("refresh_token"))
+    expires_at = data.get("expires_at")
+    if isinstance(expires_at, (int, float)):
+        return expires_at <= now + skew_seconds and not can_refresh
+
+    expires_in = data.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        issued_at = data.get("issued_at")
+        if not isinstance(issued_at, (int, float)):
+            issued_at = os.path.getmtime(token_file)
+        return issued_at + expires_in <= now + skew_seconds and not can_refresh
+
+    return False
+
+
+def _oauth_access_token_expired(token_file: str, skew_seconds: int = 60) -> bool:
     if not token_file or not os.path.exists(token_file):
         return False
     try:
@@ -281,6 +319,9 @@ class FileTokenStorage:
         self._token_file = token_file
         self._client_info_file = token_file.replace(".json", "_client.json")
 
+    def access_token_expired(self) -> bool:
+        return _oauth_access_token_expired(self._token_file)
+
     async def get_tokens(self):
         from mcp.shared.auth import OAuthToken
         if os.path.exists(self._token_file):
@@ -308,6 +349,77 @@ class FileTokenStorage:
         os.makedirs(os.path.dirname(self._client_info_file), exist_ok=True)
         with open(self._client_info_file, "w") as f:
             json.dump(client_info.model_dump(mode="json"), f, indent=2)
+
+
+def _headless_oauth_provider_class():
+    """OAuth provider for background MCP sessions.
+
+    It keeps SDK token refresh support, but when refresh cannot recover a 401,
+    it stops before the interactive authorization-code flow. Browser auth is
+    only valid from Settings > MCP where redirect/callback handlers exist.
+    """
+    from mcp.client.auth import OAuthClientProvider
+    from mcp.client.auth.utils import (
+        build_oauth_authorization_server_metadata_discovery_urls,
+        build_protected_resource_metadata_discovery_urls,
+        create_oauth_metadata_request,
+        handle_auth_metadata_response,
+        handle_protected_resource_response,
+    )
+    from mcp.client.streamable_http import MCP_PROTOCOL_VERSION
+
+    class HeadlessOAuthClientProvider(OAuthClientProvider):
+        async def async_auth_flow(self, request):
+            async with self.context.lock:
+                if not self._initialized:
+                    await self._initialize()
+                access_token_expired = getattr(self.context.storage, "access_token_expired", None)
+                if self.context.current_tokens and callable(access_token_expired) and access_token_expired():
+                    self.context.token_expiry_time = 1
+
+                self.context.protocol_version = request.headers.get(MCP_PROTOCOL_VERSION)
+
+                if not self.context.is_token_valid() and self.context.can_refresh_token():
+                    if not self.context.oauth_metadata:
+                        prm_discovery_urls = build_protected_resource_metadata_discovery_urls(
+                            None,
+                            self.context.server_url,
+                        )
+                        for url in prm_discovery_urls:
+                            prm_response = yield create_oauth_metadata_request(url)
+                            prm = await handle_protected_resource_response(prm_response)
+                            if prm:
+                                await self._validate_resource_match(prm)
+                                self.context.protected_resource_metadata = prm
+                                if prm.authorization_servers:
+                                    self.context.auth_server_url = str(prm.authorization_servers[0])
+                                break
+
+                    if self.context.auth_server_url and not self.context.oauth_metadata:
+                        asm_discovery_urls = build_oauth_authorization_server_metadata_discovery_urls(
+                            self.context.auth_server_url,
+                            self.context.server_url,
+                        )
+                        for url in asm_discovery_urls:
+                            asm_response = yield create_oauth_metadata_request(url)
+                            ok, asm = await handle_auth_metadata_response(asm_response)
+                            if ok and asm:
+                                self.context.oauth_metadata = asm
+                                break
+
+                    refresh_request = await self._refresh_token()
+                    refresh_response = yield refresh_request
+                    if not await self._handle_refresh_response(refresh_response):
+                        self._initialized = False
+
+                if self.context.is_token_valid():
+                    self._add_auth_header(request)
+
+                response = yield request
+                if response.status_code in {401, 403}:
+                    return
+
+    return HeadlessOAuthClientProvider
 
 
 class McpManager:
@@ -354,6 +466,15 @@ class McpManager:
                 self._generation += 1
             return res
         except Exception as e:
+            if oauth_config and _oauth_authorization_required_error(e):
+                logger.warning(f"MCP server {name} ({server_id}) needs OAuth authorization: {e}")
+                self._connections[server_id] = {
+                    "status": "needs_oauth",
+                    "error": "OAuth authorization required; reconnect from MCP settings",
+                    "name": name,
+                }
+                self._generation += 1
+                return False
             logger.error(f"Failed to connect MCP server {name} ({server_id}): {e}")
             error_message = _format_mcp_connection_error(name, command or "", args or [], e)
             self._connections[server_id] = {"status": "error", "error": error_message, "name": name}
@@ -448,7 +569,10 @@ class McpManager:
             response_types=oauth_config.get("response_types", ["code"]),
             scope=scope,
         )
-        return OAuthClientProvider(
+        provider_cls = OAuthClientProvider
+        if not oauth_config.get("_redirect_handler") and not oauth_config.get("_callback_handler"):
+            provider_cls = _headless_oauth_provider_class()
+        return provider_cls(
             server_url=url,
             client_metadata=client_metadata,
             storage=storage,
@@ -457,6 +581,46 @@ class McpManager:
             client_metadata_url=oauth_config.get("client_metadata_url"),
         )
 
+    async def _refresh_headless_oauth_if_needed(self, url: str, oauth_config: dict) -> None:
+        if not oauth_config:
+            return
+        if oauth_config.get("_redirect_handler") or oauth_config.get("_callback_handler"):
+            return
+        token_file = os.path.expanduser(oauth_config.get("token_file", ""))
+        if not _oauth_access_token_expired(token_file):
+            return
+
+        import httpx
+
+        auth = self._build_oauth_auth(url, oauth_config)
+        original_request = httpx.Request("GET", url)
+        flow = auth.async_auth_flow(original_request)
+        try:
+            outbound = await anext(flow)
+            async with httpx.AsyncClient(timeout=30) as client:
+                for _ in range(5):
+                    if outbound is original_request:
+                        break
+                    response = await client.send(outbound)
+                    outbound = await flow.asend(response)
+                else:
+                    raise RuntimeError("OAuth refresh did not finish metadata discovery")
+
+            if outbound is not original_request or "authorization" not in outbound.headers:
+                raise RuntimeError("OAuth refresh failed; authorization required")
+
+            try:
+                await flow.asend(httpx.Response(204, request=outbound))
+            except StopAsyncIteration:
+                pass
+        except Exception as e:
+            raise RuntimeError("OAuth authorization required; reconnect from MCP settings") from e
+        finally:
+            try:
+                await flow.aclose()
+            except Exception:
+                pass
+
     async def _connect_sse(self, server_id: str, name: str, url: str, oauth_config: dict = None) -> bool:
         """Connect to an MCP server via SSE transport."""
         try:
@@ -464,6 +628,7 @@ class McpManager:
             from mcp.client.sse import sse_client
             from contextlib import AsyncExitStack
 
+            await self._refresh_headless_oauth_if_needed(url, oauth_config)
             auth = self._build_oauth_auth(url, oauth_config) if oauth_config else None
 
             stack = AsyncExitStack()
@@ -512,6 +677,7 @@ class McpManager:
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
 
+            await self._refresh_headless_oauth_if_needed(url, oauth_config)
             auth = self._build_oauth_auth(url, oauth_config) if oauth_config else None
 
             stack = AsyncExitStack()

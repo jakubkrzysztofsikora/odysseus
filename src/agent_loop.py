@@ -1391,6 +1391,92 @@ def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num
     return tool_blocks, used_native
 
 
+_MCP_SEARCH_ARGUMENT_NAMES = frozenset({
+    "q",
+    "query",
+    "search",
+    "search_query",
+    "search_text",
+    "text",
+})
+
+
+def _latest_user_text_for_tool_repair(messages: List[Dict], max_chars: int = 320) -> str:
+    """Return the latest real user/workflow instruction, not tool-result echo."""
+    text = _recent_context_for_retrieval(messages, max_user=1, max_chars=max_chars)
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return text[:max_chars]
+
+
+def _json_object_from_tool_content(content: str) -> Dict:
+    try:
+        parsed = json.loads(content or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _repair_empty_mcp_search_tool_blocks(
+    tool_blocks: list,
+    mcp_mgr,
+    messages: List[Dict],
+) -> list:
+    """Fill empty raw MCP search calls from the current user instruction.
+
+    ChatGPT subscription routes intentionally use the text-tool path for MCP
+    because their native tool arguments often arrive as `{}`. If the model still
+    writes `mcp__...__search{}` as raw text, repair only simple search-like
+    required arguments; arbitrary MCP tools keep the normal missing-argument
+    rejection path.
+    """
+    if not mcp_mgr or not tool_blocks:
+        return tool_blocks
+
+    repair_query = ""
+    repaired = []
+    for block in tool_blocks:
+        tool_type = getattr(block, "tool_type", "")
+        if not str(tool_type).startswith("mcp__"):
+            repaired.append(block)
+            continue
+
+        args = _json_object_from_tool_content(getattr(block, "content", ""))
+        try:
+            missing = mcp_mgr.missing_required_arguments(tool_type, args)
+        except Exception:
+            missing = []
+        if not missing:
+            repaired.append(block)
+            continue
+
+        name_lc = str(tool_type).lower()
+        missing_search_args = [
+            str(name)
+            for name in missing
+            if str(name).lower() in _MCP_SEARCH_ARGUMENT_NAMES
+        ]
+        if not missing_search_args or "search" not in name_lc:
+            repaired.append(block)
+            continue
+
+        if not repair_query:
+            repair_query = _latest_user_text_for_tool_repair(messages)
+        if not repair_query:
+            repaired.append(block)
+            continue
+
+        fixed = dict(args)
+        for name in missing_search_args:
+            fixed[name] = repair_query
+        logger.warning(
+            "Repaired empty MCP search arguments for %s with latest user instruction",
+            tool_type,
+        )
+        repaired.append(ToolBlock(tool_type, json.dumps(fixed)))
+
+    return repaired
+
+
 def _append_tool_results(
     messages: List[Dict],
     round_response: str,
@@ -2270,6 +2356,7 @@ async def stream_agent_loop(
             # Intercept [DONE] — don't forward until all rounds finish
 
         tool_blocks, used_native = _resolve_tool_blocks(round_response, native_tool_calls, round_num)
+        tool_blocks = _repair_empty_mcp_search_tool_blocks(tool_blocks, mcp_mgr, messages)
 
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
