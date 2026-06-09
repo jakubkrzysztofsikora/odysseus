@@ -122,6 +122,7 @@ _API_AGENT_RULES = """\
 - AFTER A TOOL SUCCEEDS, do not second-guess. A success response means it worked. Reply in ONE short sentence confirming what was done. No verification thinking, no re-analyzing — move on.
 - AFTER A TOOL FAILS, DO NOT GO SILENT. The user expects a follow-up: retry with a fix, run a diagnostic (`tail`, `ls`, `which`), or explicitly tell them what didn't work and what you'll try next. Failure is not a stopping condition.
 - YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; don't quit early just because you've made a few calls. Three ways to end a turn: (1) DONE — before declaring it, verify every concrete deliverable the user asked for actually exists or succeeded; then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you can't proceed (missing capability, permission denied, unobtainable data), so state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off mid-task without (1) or (2), and never repeat a call you already ran.
+- Native function calls must include every required JSON field. Never call `bash` with `{}`; use `{"command":"..."}`. Never call MCP search tools with `{}`; use `{"query":"..."}` or the required field name shown for that tool.
 - Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
 - "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate. `manage_tasks` is for RECURRING background AI jobs, NOT for one-off user reminders.
 - "Disable/turn off/enable/turn on <tool>" (shell, search, research, browser, documents, incognito, etc.) → call `ui_control` with `toggle <name> <on|off>`. Aliases accepted: shell→bash, search→web, deepresearch→research, documents→document_editor. NEVER record this as a memory — the user wants the toggle flipped, not a note about preferring it.
@@ -672,17 +673,43 @@ def _mcp_targets_ready(mcp_mgr, disabled_map: Dict[str, set], targets: Set[str])
     return any(target.lower() in text for target in targets)
 
 
-def _mcp_prompt_arg_example(input_schema: Dict) -> Dict[str, str]:
+def _mcp_search_example_from_query(query: str) -> str:
+    source = re.sub(r"\s+", " ", query or "").strip()
+    if not source:
+        return ""
+    patterns = (
+        r"\b(?:search|find|fetch|query|look up)\s+(?:for\s+)?(.+?)(?=(?:\.\s+(?:Then|After|Next|Finally|Once|When|Return|Answer)\b)|$)",
+        r"\buse\s+[^.]{0,80}?\bmcp\s+to\s+(.+?)(?=(?:\.\s+(?:Then|After|Next|Finally|Once|When|Return|Answer)\b)|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, source, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        value = re.sub(r"^(?:search|find|fetch|query|look up)\s+(?:for\s+)?", "", value, flags=re.IGNORECASE)
+        if value:
+            return value[:220]
+    return source[:220]
+
+
+def _mcp_prompt_example_value(name: str, query: str) -> str:
+    cleaned = re.sub(r"\s+", " ", query or "").strip()
+    if cleaned and str(name).lower() in _MCP_SEARCH_ARGUMENT_NAMES:
+        return _mcp_search_example_from_query(cleaned)
+    return "real non-empty value"
+
+
+def _mcp_prompt_arg_example(input_schema: Dict, query: str = "") -> Dict[str, str]:
     if not isinstance(input_schema, dict):
-        return {"query": "real non-empty value"}
+        return {"query": _mcp_prompt_example_value("query", query)}
     props = input_schema.get("properties")
     if not isinstance(props, dict) or not props:
-        return {"query": "real non-empty value"}
+        return {"query": _mcp_prompt_example_value("query", query)}
     required = input_schema.get("required")
     names = [str(n) for n in required if str(n) in props] if isinstance(required, list) else []
     if not names:
         names = [str(n) for n in props.keys()]
-    return {name: "real non-empty value" for name in names[:3]}
+    return {name: _mcp_prompt_example_value(name, query) for name in names[:3]}
 
 
 def _build_mcp_target_message(
@@ -720,13 +747,14 @@ def _build_mcp_target_message(
     lines = [
         "MCP TARGET TOOLS FOR THIS REQUEST:",
         "These MCP tools are connected and available. If the user asked for one of these servers/tools, call it; do not say it is unavailable.",
-        "For text-tool models, write one raw function-call line with non-empty JSON arguments, for example:",
+        "For native tool-call models, call these exact function names with the JSON object shape shown. Never send `{}`.",
+        "For text-tool models, write one raw function-call line with the same non-empty JSON arguments, for example:",
     ]
     for tool in selected:
         qualified = str(tool.get("qualified_name") or "")
         if not qualified.startswith("mcp__"):
             qualified = f"mcp__{tool.get('server_id')}__{tool.get('name')}"
-        example = _mcp_prompt_arg_example(tool.get("input_schema") or {})
+        example = _mcp_prompt_arg_example(tool.get("input_schema") or {}, query)
         lines.append(f"- {qualified}{json.dumps(example, separators=(',', ':'))}  # {tool.get('server_name')}")
     return {"role": "system", "content": "\n".join(lines), "_protected": True}
 
@@ -1317,26 +1345,49 @@ def _schema_function_names(schemas: list) -> Set[str]:
     return names
 
 
+def _targeted_mcp_schema_names(mcp_schemas: list, query: str) -> Set[str]:
+    targets = _mcp_target_hints(query)
+    if not targets:
+        return set()
+    selected = set()
+    target_lc = {target.lower() for target in targets}
+    for schema in mcp_schemas or []:
+        if not isinstance(schema, dict):
+            continue
+        fn = schema.get("function") if isinstance(schema.get("function"), dict) else {}
+        name = str(fn.get("name") or schema.get("name") or "")
+        if not name:
+            continue
+        desc = str(fn.get("description") or schema.get("description") or "")
+        haystack = f"{name}\n{desc}".lower()
+        if any(target in haystack for target in target_lc):
+            selected.add(name)
+    return selected
+
+
 def _include_mcp_schema_names(
     relevant_tools: Optional[Set[str]],
     mcp_schemas: list,
     *,
     force_all_mcp_tools: bool,
+    query: str = "",
 ) -> Optional[Set[str]]:
     """Make MCP native schemas eligible for the outgoing tool list.
 
     RAG normally keeps the tool list compact. Multiagent/group runs are a
-    deliberate exception: participants are expected to have the same external
-    tool surface as an agent, and reconnecting an MCP server mid-run must make
-    its newly discovered tools callable on the next round.
+    deliberate exception, but when the current request clearly targets a named
+    MCP server, keep that exception narrow. Sending every connected MCP schema
+    to OpenAI-compatible models makes them more likely to pick a correct tool
+    name while leaving required args as `{}`.
     """
     if not force_all_mcp_tools:
         return relevant_tools
     schema_names = _schema_function_names(mcp_schemas)
     if not schema_names:
         return relevant_tools
+    targeted = _targeted_mcp_schema_names(mcp_schemas, query)
     merged = set(relevant_tools or set())
-    merged.update(schema_names)
+    merged.update(targeted or schema_names)
     return merged
 
 
@@ -1589,6 +1640,74 @@ def _repair_empty_local_tool_blocks(tool_blocks: list, messages: List[Dict]) -> 
         logger.warning("Repaired empty bash arguments with explicit latest user command")
         repaired.append(ToolBlock("bash", bash_command))
     return repaired
+
+
+def _sync_repaired_native_tool_call_arguments(
+    native_tool_calls: list,
+    tool_blocks: list,
+    used_native: bool,
+) -> list:
+    """Echo repaired arguments back into assistant tool_calls for the next round."""
+    if not used_native or not native_tool_calls or not tool_blocks:
+        return []
+
+    repaired_sigs = []
+    for tc, block in zip(native_tool_calls, tool_blocks):
+        tool_type = getattr(block, "tool_type", "")
+        content = getattr(block, "content", "")
+        fixed_args = None
+        if str(tool_type).startswith("mcp__"):
+            try:
+                parsed = json.loads(content or "{}")
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+            if isinstance(parsed, dict) and parsed:
+                fixed_args = json.dumps(parsed)
+        elif tool_type == "bash" and str(content or "").strip():
+            fixed_args = json.dumps({"command": str(content).strip()})
+        elif tool_type == "python" and str(content or "").strip():
+            fixed_args = json.dumps({"code": str(content).strip()})
+
+        if fixed_args and fixed_args != tc.get("arguments"):
+            tc["arguments"] = fixed_args
+            repaired_sigs.append(_tool_block_signature(block))
+
+    return repaired_sigs
+
+
+def _tool_block_signature(block: ToolBlock) -> str:
+    return f"{getattr(block, 'tool_type', '')}:{str(getattr(block, 'content', '') or '').strip()[:500]}"
+
+
+def _record_repaired_empty_argument_calls(
+    repaired_sigs: list,
+    counts: collections.Counter,
+    *,
+    threshold: int = 2,
+) -> list:
+    """Return signatures that repeat after an empty-argument repair."""
+    repeated = []
+    for sig in repaired_sigs:
+        counts[sig] += 1
+        if counts[sig] >= threshold:
+            repeated.append(sig)
+    return repeated
+
+
+def _tool_events_include_bash_command(tool_events: list, command: str) -> bool:
+    command = (command or "").strip()
+    if not command:
+        return False
+    for event in tool_events or []:
+        if event.get("tool") != "bash":
+            continue
+        haystack = "\n".join(
+            str(event.get(key) or "")
+            for key in ("command", "output")
+        )
+        if command in haystack:
+            return True
+    return False
 
 
 def _append_tool_results(
@@ -2076,6 +2195,7 @@ async def stream_agent_loop(
         _relevant_tools,
         mcp_schemas,
         force_all_mcp_tools=force_all_mcp_tools,
+        query=_retrieval_query,
     )
     _last_mcp_generation = getattr(mcp_mgr, "_generation", None) if mcp_mgr else None
     prep_timings["prompt_build"] = time.time() - _t2
@@ -2161,6 +2281,7 @@ async def stream_agent_loop(
     _stuck_rounds = 0
     _tool_type_counts: collections.Counter = collections.Counter()
     _empty_arg_tool_counts: collections.Counter = collections.Counter()
+    _repaired_empty_arg_call_counts: collections.Counter = collections.Counter()
     _THINK_RE = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
     # Supervisor: how many times we've nudged the model after it announced
@@ -2247,6 +2368,7 @@ async def stream_agent_loop(
                     _relevant_tools,
                     mcp_schemas,
                     force_all_mcp_tools=force_all_mcp_tools,
+                    query=_retrieval_query,
                 )
                 logger.info(
                     "[agent] MCP tool set refreshed: generation %s -> %s, schemas=%d",
@@ -2468,6 +2590,11 @@ async def stream_agent_loop(
         tool_blocks, used_native = _resolve_tool_blocks(round_response, native_tool_calls, round_num)
         tool_blocks = _repair_empty_mcp_search_tool_blocks(tool_blocks, mcp_mgr, messages)
         tool_blocks = _repair_empty_local_tool_blocks(tool_blocks, messages)
+        _repaired_sigs = _sync_repaired_native_tool_call_arguments(native_tool_calls, tool_blocks, used_native)
+        _repeated_repaired_sigs = _record_repaired_empty_argument_calls(
+            _repaired_sigs,
+            _repaired_empty_arg_call_counts,
+        )
 
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
@@ -2548,6 +2675,55 @@ async def stream_agent_loop(
         # Keep <think> blocks so they render in the thinking section on reload
         cleaned_round = strip_tool_blocks(round_response).strip()
         round_texts.append(cleaned_round)
+
+        _real_text_for_repaired_repeat = _THINK_RE.sub("", cleaned_round).strip()
+        if _repeated_repaired_sigs:
+            logger.warning(
+                "[agent] repeated repaired empty-argument native call(s): %s",
+                [sig[:120] for sig in _repeated_repaired_sigs],
+            )
+            if _real_text_for_repaired_repeat:
+                tool_blocks = []
+            else:
+                pending_bash_command = _extract_explicit_bash_command(
+                    _latest_user_message_for_arg_repair(messages)
+                )
+                if (
+                    pending_bash_command
+                    and "bash" not in disabled_tools
+                    and not _tool_events_include_bash_command(tool_events, pending_bash_command)
+                ):
+                    for sig in _repeated_repaired_sigs:
+                        repeated_tool = sig.split(":", 1)[0].strip()
+                        if repeated_tool:
+                            disabled_tools.add(repeated_tool)
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You repeated a native MCP/search tool call with empty "
+                            "arguments after Odysseus already repaired and executed "
+                            "that call. Do not call that MCP/search tool again in this "
+                            "turn. The user also gave an exact Bash command that has "
+                            "not run yet. Run this Bash command now with a populated "
+                            f"`command` argument: {pending_bash_command}"
+                        ),
+                    })
+                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    continue
+                _force_answer = True
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "You repeated a native tool call with empty arguments after "
+                        "Odysseus repaired and executed that same call earlier in this "
+                        "turn. STOP calling tools. Use the tool results already in the "
+                        "conversation and write the final handoff/artifact now. If the "
+                        "available results are incomplete, say exactly what is missing "
+                        "in one short note and continue with the best draft you can."
+                    ),
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
 
         if not tool_blocks:
             # ── Completion verifier (mechanism 3a) ────────────────────
@@ -2645,7 +2821,7 @@ async def stream_agent_loop(
         # runaway backstop). On bail we don't give up — we force one
         # tool-free round so the model declares done or declares blocked,
         # mirroring Terminus's explicit-completion handshake.
-        _sig = "|".join(sorted(f"{b.tool_type}:{(b.content or '').strip()[:120]}" for b in tool_blocks))
+        _sig = "|".join(sorted(_tool_block_signature(b)[:160] for b in tool_blocks))
         _is_repeat = _sig in _recent_call_sigs
         _recent_call_sigs.append(_sig)
         for _b in tool_blocks:

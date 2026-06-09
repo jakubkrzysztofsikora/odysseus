@@ -31,6 +31,9 @@ from src.agent_loop import (
     _resolve_tool_blocks,
     _repair_empty_mcp_search_tool_blocks,
     _repair_empty_local_tool_blocks,
+    _sync_repaired_native_tool_call_arguments,
+    _record_repaired_empty_argument_calls,
+    _tool_events_include_bash_command,
     ToolBlock,
 )
 from src.tool_parsing import parse_tool_blocks
@@ -161,6 +164,33 @@ class TestMcpToolVisibility:
             "mcp__atlassian__search",
             "mcp__browser__navigate",
         }
+
+    def test_multiagent_force_targets_named_mcp_schemas_when_query_matches(self):
+        schemas = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__0ac61a6b__search",
+                    "description": "[MCP:Atlassian] Search Atlassian",
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__builtin_browser__navigate",
+                    "description": "[MCP:Browser] Navigate pages",
+                },
+            },
+        ]
+
+        tools = _include_mcp_schema_names(
+            {"bash"},
+            schemas,
+            force_all_mcp_tools=True,
+            query="Sequential group handoff. Use Atlassian MCP to search Circit AI context.",
+        )
+
+        assert tools == {"bash", "mcp__0ac61a6b__search"}
 
     def test_normal_agent_keeps_rag_selected_tools_compact(self):
         schemas = [
@@ -310,7 +340,11 @@ class TestMcpToolVisibility:
 
         assert msg["role"] == "system"
         assert "do not say it is unavailable" in msg["content"]
-        assert 'mcp__0ac61a6b__search{"query":"real non-empty value"}' in msg["content"]
+        assert "Never send `{}`" in msg["content"]
+        assert (
+            'mcp__0ac61a6b__search{"query":"Circit AI"}'
+            in msg["content"]
+        )
         assert "mcp__circitron__ping" not in msg["content"]
 
 
@@ -444,6 +478,21 @@ class TestMcpSearchArgumentRepair:
             "query": "Use Atlassian MCP to search Circit AI usage patterns"
         }
 
+    def test_repaired_native_mcp_args_are_echoed_to_next_round(self):
+        messages = [{"role": "user", "content": "Use Atlassian MCP to search Circit AI usage patterns"}]
+        native = [{"id": "call_1", "name": "mcp__0ac61a6b__search", "arguments": "{}"}]
+        blocks, used_native = _resolve_tool_blocks("", native, 1)
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, None, messages)
+
+        repaired_sigs = _sync_repaired_native_tool_call_arguments(native, repaired, used_native)
+
+        assert json.loads(native[0]["arguments"]) == {
+            "query": "Use Atlassian MCP to search Circit AI usage patterns"
+        }
+        assert repaired_sigs == [
+            "mcp__0ac61a6b__search:{\"query\": \"Use Atlassian MCP to search Circit AI usage patterns\"}"
+        ]
+
     def test_non_search_mcp_tool_is_not_repaired_without_live_schema(self):
         messages = [{"role": "user", "content": "Create a Jira issue for the launch plan"}]
         blocks = [ToolBlock("mcp__atlassian__createIssue", "{}")]
@@ -494,6 +543,47 @@ class TestLocalToolArgumentRepair:
 
         assert used_native is True
         assert repaired[0].content == "printf 'SMOKE native-bash-ok'"
+
+    def test_repaired_native_bash_args_are_echoed_to_next_round(self):
+        messages = [
+            {
+                "role": "user",
+                "content": "Run bash with command exactly: printf 'SMOKE native-bash-ok'.",
+            }
+        ]
+        native = [{"id": "call_1", "name": "bash", "arguments": "{}"}]
+        blocks, used_native = _resolve_tool_blocks("", native, 1)
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        repaired_sigs = _sync_repaired_native_tool_call_arguments(native, repaired, used_native)
+
+        assert json.loads(native[0]["arguments"]) == {
+            "command": "printf 'SMOKE native-bash-ok'"
+        }
+        assert repaired_sigs == ["bash:printf 'SMOKE native-bash-ok'"]
+
+    def test_repeated_repaired_empty_arg_call_is_reported(self):
+        counts = collections.Counter()
+        first = _record_repaired_empty_argument_calls(["bash:printf ok"], counts)
+        second = _record_repaired_empty_argument_calls(["bash:printf ok"], counts)
+
+        assert first == []
+        assert second == ["bash:printf ok"]
+
+    def test_bash_command_event_match_detects_pending_exact_command(self):
+        events = [
+            {
+                "tool": "bash",
+                "command": "printf 'SMOKE native-bash-ok'",
+                "output": "SMOKE native-bash-ok",
+            }
+        ]
+
+        assert _tool_events_include_bash_command(
+            events,
+            "printf 'SMOKE native-bash-ok'",
+        ) is True
+        assert _tool_events_include_bash_command(events, "printf 'missing'") is False
 
     def test_empty_bash_repair_does_not_capture_followup_instruction(self):
         messages = [

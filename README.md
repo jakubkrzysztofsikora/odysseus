@@ -13,7 +13,7 @@ A self-hosted AI workspace -- meant to be the self-hosted version of the UI expe
 ## Features
   - **Chat** -- chat with any local model or API; adding them is super simple.<br>　<sub>vLLM · llama.cpp · Ollama · OpenRouter · OpenAI · GitHub Copilot</sub>
   - **Agent** -- hand it tools and let it run the whole task itself.<br>　<sub>built on [opencode](https://github.com/anomalyco/opencode) · MCP · web · files · shell · skills · memory</sub>
-  - **Group agents** -- run several personas/models as one workflow; sequential mode passes each agent's artifact to the next agent in order.<br>　<sub>MCP-aware · repo workspace tools · checker/reviewer handoff · raw tool-call cleanup</sub>
+  - **Group agents** -- run several personas/models as one workflow; sequential mode passes each agent's artifact to the next agent in order.<br>　<sub>MCP-aware · repo workspace tools · checker/reviewer handoff · GPT native-tool argument repair</sub>
   - **Cookbook** -- Scans your hardware, recommends models, click to download and serve.. easy!<br>　<sub>built on [llmfit](https://github.com/AlexsJones/llmfit) · VRAM-aware · GGUF / FP8 / AWQ · fit scoring · vLLM / llama.cpp serving</sub>
   - **Deep Research** -- multi-step runs that gather, read, and synthesize sources into a nice visual report.<br>　<sub>adapted from [Tongyi DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)</sub>
   - **Compare** -- a fun tool to compare models side by side. Test completely blind, no bias!<br>　<sub>multi-model · blind test · synthesis</sub>
