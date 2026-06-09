@@ -602,6 +602,24 @@ class TestLocalToolArgumentRepair:
 
         assert repaired[0].content == "pwd && git status --short | head -20"
 
+    def test_empty_bash_repair_finds_backtick_command_without_colon(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Use Atlassian MCP search first. "
+                    "Then use Bash exactly once with command "
+                    "`printf SMOKE_ODYSSEUS_MCP_BASH_OK`. "
+                    "After both tool outputs, write the final handoff."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == "printf SMOKE_ODYSSEUS_MCP_BASH_OK"
+
     def test_empty_bash_repair_finds_command_late_in_group_handoff(self):
         messages = [
             {

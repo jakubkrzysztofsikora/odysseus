@@ -146,3 +146,15 @@ def test_summarize_stream_error():
     assert "400" in llm_core._summarize_stream_error('event: error\ndata: {"status": 400, "text": "nope"}\n\n')
     assert llm_core._summarize_stream_error(None) == "primary model failed"
     assert llm_core._summarize_stream_error("garbage") == "primary model failed"
+
+
+def test_stream_read_timeout_is_capped(monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_STREAM_READ_TIMEOUT_CAP_SECONDS", raising=False)
+    assert llm_core._stream_read_timeout_seconds(300) == 45.0
+    assert llm_core._stream_read_timeout_seconds(12) == 12.0
+
+    monkeypatch.setenv("ODYSSEUS_STREAM_READ_TIMEOUT_CAP_SECONDS", "5")
+    assert llm_core._stream_read_timeout_seconds(300) == 5.0
+
+    monkeypatch.setenv("ODYSSEUS_STREAM_READ_TIMEOUT_CAP_SECONDS", "0")
+    assert llm_core._stream_read_timeout_seconds(300) == 300.0

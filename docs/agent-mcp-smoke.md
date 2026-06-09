@@ -8,6 +8,8 @@ The regression target is a `chatgpt/*` model using native MCP function schemas, 
 - see owner-scoped MCP tools when authenticated as an admin user, or with an Odysseus API token whose owner is an admin;
 - call an MCP search tool with a non-empty query;
 - call Bash with non-empty arguments;
+- prove Bash succeeded by checking the `tool_output` exit code is `0` and the
+  expected marker appears in the actual tool output, not only in final prose;
 - continue to a final answer after tool outputs;
 - pass even when the session stores an OpenAI-compatible base URL such as `/v1`;
   dispatch must normalize it to `/v1/chat/completions`.
@@ -23,6 +25,11 @@ SMOKE_RESULT {'ok_mcp': True, 'ok_bash': True, 'ok_final': True, ...}
 ```
 
 Check the server log for the same marker. A passing run shows native MCP calls or parsed MCP/Bash tool blocks across multiple rounds, then a final answer. It must not dispatch missing required MCP arguments or `Tool 'bash' was called with empty arguments`, and LiteLLM must show `POST /v1/chat/completions`, not `POST /v1`.
+
+Streaming reads are capped by `ODYSSEUS_STREAM_READ_TIMEOUT_CAP_SECONDS`
+(default `45`) so an upstream HTTP 200 with no assistant/tool-call bytes fails
+fast and can route through the normal pre-content fallback path instead of
+leaving the agent turn open for the full UI stream timeout.
 
 The native path repairs empty MCP search arguments before dispatch. If GPT emits an empty native Bash call but the latest user instruction explicitly contains the Bash command, that command is repaired before execution. Repaired native tool arguments are echoed back into the assistant `tool_calls` history so the next round sees the executed arguments, not `{}`. If GPT repeats the same repaired empty MCP/search call, Odysseus suppresses that repeat; if an exact Bash command is still pending it nudges Bash next, otherwise it forces a tool-free final artifact.
 

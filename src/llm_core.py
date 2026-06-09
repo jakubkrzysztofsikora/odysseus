@@ -6,6 +6,7 @@ import json
 import logging
 import hashlib
 import threading
+import os
 from fastapi import HTTPException
 from typing import Optional, Dict, List
 from src.model_context import get_context_length, DEFAULT_CONTEXT
@@ -1255,7 +1256,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
 
     # Short connect timeout: a reachable peer answers SYN in <100ms even on
     # Tailscale. 3s is plenty; 30s let one dead upstream wedge the UI.
-    stream_timeout = httpx.Timeout(connect=3.0, read=float(timeout), write=30.0, pool=5.0)
+    stream_timeout = httpx.Timeout(
+        connect=3.0,
+        read=_stream_read_timeout_seconds(timeout),
+        write=30.0,
+        pool=5.0,
+    )
 
     if _is_host_dead(target_url):
         yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
@@ -1665,6 +1671,21 @@ def _empty_stream_error(model: str) -> str:
         )
         + "\n\n"
     )
+
+
+def _stream_read_timeout_seconds(timeout: int | float | None) -> float:
+    """Cap per-read stream inactivity so HTTP 200/no-byte stalls can fallback."""
+    try:
+        requested = float(timeout or LLMConfig.STREAM_TIMEOUT)
+    except (TypeError, ValueError):
+        requested = float(LLMConfig.STREAM_TIMEOUT)
+    try:
+        cap = float(os.getenv("ODYSSEUS_STREAM_READ_TIMEOUT_CAP_SECONDS", "45"))
+    except (TypeError, ValueError):
+        cap = 45.0
+    if cap <= 0:
+        return max(1.0, requested)
+    return max(1.0, min(requested, cap))
 
 
 async def stream_llm_with_fallback(candidates, messages, **kwargs):

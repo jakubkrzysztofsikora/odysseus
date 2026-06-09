@@ -1575,6 +1575,10 @@ def _extract_explicit_bash_command(text: str) -> str:
     if not source:
         return ""
     patterns = (
+        r"(?:bash|shell)[^.]{0,180}?\bcommand\s+exactly\s+`([^`]+)`",
+        r"(?:bash|shell)[^.]{0,180}?\bcommand\s+`([^`]+)`",
+        r"(?:bash|shell)[^.]{0,180}?\bcommand\s+exactly\s+['\"]([^'\"]+)['\"]",
+        r"(?:bash|shell)[^.]{0,180}?\bcommand\s+['\"]([^'\"]+)['\"]",
         r"(?:bash|shell)[^.]{0,180}?\bcommand exactly\s*:\s*(.+?)(?=(?:\.\s+[A-Z])|$)",
         r"(?:bash|shell)[^.]{0,180}?\bcommand\s*:\s*(.+?)(?=(?:\.\s+[A-Z])|$)",
     )
