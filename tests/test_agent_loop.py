@@ -19,6 +19,7 @@ from src.agent_loop import (
     _detect_admin_intent,
     _compute_final_metrics,
     _append_tool_results,
+    _allow_native_tool_schemas_for_non_api_model,
     _include_mcp_schema_names,
     _record_empty_argument_tool_call,
 )
@@ -127,6 +128,11 @@ class TestDetectAdminIntent:
 
 
 class TestMcpToolVisibility:
+    def _schemas(self):
+        return [
+            {"type": "function", "function": {"name": "mcp__atlassian__search"}},
+        ]
+
     def test_multiagent_force_includes_mcp_schema_names(self):
         schemas = [
             {"type": "function", "function": {"name": "mcp__atlassian__search"}},
@@ -157,6 +163,38 @@ class TestMcpToolVisibility:
         )
 
         assert tools == {"api_call"}
+
+    def test_chatgpt_route_does_not_get_native_mcp_schemas_by_default(self):
+        assert _allow_native_tool_schemas_for_non_api_model(
+            "chatgpt/gpt-5.5",
+            None,
+            self._schemas(),
+            "use atlassian mcp to search Circit context",
+        ) is False
+
+    def test_chatgpt_route_can_opt_into_native_mcp_schemas(self):
+        assert _allow_native_tool_schemas_for_non_api_model(
+            "chatgpt/gpt-5.5",
+            True,
+            self._schemas(),
+            "use atlassian mcp to search Circit context",
+        ) is True
+
+    def test_non_api_model_still_gets_mcp_schemas_when_prompt_requests_mcp(self):
+        assert _allow_native_tool_schemas_for_non_api_model(
+            "mistral",
+            None,
+            self._schemas(),
+            "use atlassian mcp to search Circit context",
+        ) is True
+
+    def test_non_api_model_skips_mcp_schemas_without_mcp_intent(self):
+        assert _allow_native_tool_schemas_for_non_api_model(
+            "mistral",
+            None,
+            self._schemas(),
+            "write a short poem",
+        ) is False
 
 
 # ---------------------------------------------------------------------------

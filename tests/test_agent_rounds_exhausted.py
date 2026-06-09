@@ -68,3 +68,48 @@ def test_no_rounds_exhausted_on_normal_finish(monkeypatch):
     # A plain answer (no tool block) -> done-break on round 1 -> no event.
     events = _run_loop(monkeypatch, "All done, here is your answer.", max_rounds=2)
     assert not any(e.get("type") == "rounds_exhausted" for e in events), events
+
+
+def test_chatgpt_route_does_not_receive_native_mcp_schemas(monkeypatch):
+    _patch_common(monkeypatch)
+    captured_tools = []
+
+    class FakeMcp:
+        _generation = 1
+
+        def get_all_openai_schemas(self, *_args, **_kwargs):
+            return [{
+                "type": "function",
+                "function": {
+                    "name": "mcp__remote__search",
+                    "description": "Search remote context.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }]
+
+        def get_tool_descriptions_for_prompt(self, *_args, **_kwargs):
+            return "\n- mcp__remote__search Args (JSON): {\"query\": string (required)}"
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        captured_tools.append(kwargs.get("tools"))
+        yield f'data: {json.dumps({"delta": "done"})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: FakeMcp(), raising=False)
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+
+    gen = al.stream_agent_loop(
+        "http://x/v1",
+        "chatgpt/gpt-5.5",
+        [{"role": "user", "content": "use atlassian mcp to search Circit context"}],
+        max_rounds=1,
+        relevant_tools={"mcp__remote__search"},
+    )
+    events = _types(_collect(gen))
+
+    assert not any(e.get("type") == "rounds_exhausted" for e in events), events
+    assert captured_tools == [None]

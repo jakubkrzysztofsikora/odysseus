@@ -1364,10 +1364,11 @@ async def execute_tool_block(
         # MCP tool dispatch
         mcp = get_mcp_manager()
         if mcp:
+            raw_content = content.strip() if isinstance(content, str) else ""
             try:
-                args = json.loads(content) if content.strip().startswith("{") else {}
+                args = json.loads(raw_content) if raw_content else {}
             except (json.JSONDecodeError, TypeError):
-                args = {}
+                args = content
             desc = f"mcp: {tool}"
             result = await mcp.call_tool(tool, args)
         else:

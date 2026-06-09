@@ -352,6 +352,82 @@ def test_coerce_tool_arguments_maps_scalar_to_single_required_arg():
     ) == {"query": "circit ai"}
 
 
+def test_coerce_tool_arguments_maps_raw_string_to_single_required_arg():
+    mgr = McpManager()
+    mgr._tools["remote"] = [
+        {
+            "name": "search",
+            "description": "Search Atlassian",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        }
+    ]
+
+    assert mgr.coerce_tool_arguments(
+        "mcp__remote__search",
+        "circit ai",
+    ) == {"query": "circit ai"}
+
+
+def test_coerce_tool_arguments_maps_single_unknown_key_to_required_arg():
+    mgr = McpManager()
+    mgr._tools["remote"] = [
+        {
+            "name": "search",
+            "description": "Search Atlassian",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        }
+    ]
+
+    assert mgr.coerce_tool_arguments(
+        "mcp__remote__search",
+        {"q": "circit ai"},
+    ) == {"query": "circit ai"}
+    assert mgr.coerce_tool_arguments(
+        "mcp__remote__search",
+        {"arguments": "circit ai"},
+    ) == {"query": "circit ai"}
+    assert mgr.coerce_tool_arguments(
+        "mcp__remote__search",
+        {"query": "circit ai"},
+    ) == {"query": "circit ai"}
+
+
+def test_call_tool_coerces_raw_string_before_network(monkeypatch):
+    mgr = McpManager()
+    mgr._sessions["remote"] = object()
+    mgr._tools["remote"] = [
+        {
+            "name": "search",
+            "description": "Search Atlassian",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        }
+    ]
+    captured = {}
+
+    async def fake_do_call(_session, _tool_name, arguments):
+        captured["arguments"] = arguments
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(mgr, "_do_call", fake_do_call)
+
+    result = asyncio.run(mgr.call_tool("mcp__remote__search", "circit ai"))
+
+    assert result == {"content": [{"type": "text", "text": "ok"}]}
+    assert captured["arguments"] == {"query": "circit ai"}
+
+
 def test_openai_schemas_normalize_mcp_required_parameters():
     mgr = McpManager()
     mgr._connections["remote"] = {"status": "connected", "name": "Atlassian"}

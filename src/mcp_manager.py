@@ -795,14 +795,26 @@ class McpManager:
     ) -> Dict[str, Any]:
         """Coerce model-emitted MCP args without dropping useful scalar values."""
         args = arguments if isinstance(arguments, dict) else {}
-        if args or scalar_arg is None:
-            return args
         server_id, tool_name = self._split_qualified_tool_name(qualified_name)
         if not server_id or not tool_name:
             return args
         schema = self._input_schema_for_tool(server_id, tool_name)
         props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        if scalar_arg is None:
+            if isinstance(arguments, str):
+                scalar_arg = arguments
+            elif isinstance(arguments, list) and arguments:
+                scalar_arg = arguments[0]
+            elif isinstance(arguments, dict) and len(arguments) == 1:
+                key, value = next(iter(arguments.items()))
+                if (props or required) and str(key) not in props:
+                    if isinstance(value, dict) and any(str(name) in value for name in required):
+                        return value
+                    scalar_arg = value
+                    args = {}
+        if args or scalar_arg is None:
+            return args
         if len(required) == 1:
             return {str(required[0]): scalar_arg}
         if len(props) == 1:

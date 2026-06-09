@@ -1128,6 +1128,26 @@ def _include_mcp_schema_names(
     return merged
 
 
+def _allow_native_tool_schemas_for_non_api_model(
+    model: str,
+    endpoint_supports: Optional[bool],
+    mcp_schemas: list,
+    last_user: str,
+) -> bool:
+    """Whether a fenced/text-tool model may still receive native MCP schemas.
+
+    Some routes are deliberately forced off native tools even though the model
+    name looks tool-capable. `chatgpt/*` through LiteLLM's subscription routes
+    is one of those: logs show it repeatedly emits the right MCP tool name with
+    `{}` arguments. It still has MCP access through the prompt/raw-text parser,
+    so do not send native schemas unless the endpoint is explicitly overridden.
+    """
+    if endpoint_supports is not True and (model or "").lower().startswith("chatgpt/"):
+        return False
+    _last_content = (last_user or "").lower()
+    return bool(mcp_schemas) and any(kw in _last_content for kw in _MCP_KEYWORDS)
+
+
 
 def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num: int):
     """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
@@ -1852,9 +1872,16 @@ async def stream_agent_loop(
                 ]
         else:
             # Local: only MCP schemas when message suggests MCP tool usage
-            _last_content = _last_user.lower()
-            _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
-            all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
+            all_tool_schemas = (
+                mcp_schemas
+                if _allow_native_tool_schemas_for_non_api_model(
+                    model,
+                    _endpoint_supports,
+                    mcp_schemas,
+                    _last_user,
+                )
+                else []
+            )
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
