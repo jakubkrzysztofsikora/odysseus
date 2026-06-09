@@ -207,6 +207,15 @@ class TestMcpToolVisibility:
             "write a short poem",
         ) is False
 
+    def test_multiagent_force_keeps_native_mcp_schemas_without_latest_mcp_keyword(self):
+        assert _allow_native_tool_schemas_for_non_api_model(
+            "chatgpt/gpt-5.5",
+            None,
+            self._schemas(),
+            "Sequential group handoff. Previous participant output: build the plan",
+            force_all_mcp_tools=True,
+        ) is True
+
     def test_mcp_prompt_wait_detects_targeted_mcp_requests(self):
         assert _mcp_prompt_requested("Use Atlassian MCP to search Jira", False) is True
         assert _mcp_target_hints("Use Atlassian MCP to search Jira") == {
@@ -485,6 +494,49 @@ class TestLocalToolArgumentRepair:
 
         assert used_native is True
         assert repaired[0].content == "printf 'SMOKE native-bash-ok'"
+
+    def test_empty_bash_repair_does_not_capture_followup_instruction(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Also run Bash with the exact command: "
+                    "pwd && git status --short | head -20\n"
+                    "After the tools return, summarize only the useful handoff."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == "pwd && git status --short | head -20"
+
+    def test_empty_bash_repair_finds_command_late_in_group_handoff(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Sequential group handoff.\n\n"
+                    "Previous participant output:\n"
+                    + ("long artifact line\n" * 500)
+                    + "\nOriginal user task for context only:\n"
+                    "Inspect the repository.\n"
+                    "Continue with your assigned checker role and run Bash command: "
+                    "git rev-parse --show-toplevel && rg -n \"multiagent|mcp\" "
+                    "static/js/group.js src/agent_loop.py | head -20\n"
+                    "After those two tools return, provide a concise checked handoff."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == (
+            'git rev-parse --show-toplevel && rg -n "multiagent|mcp" '
+            "static/js/group.js src/agent_loop.py | head -20"
+        )
 
     def test_empty_bash_args_are_not_repaired_without_explicit_command(self):
         messages = [{"role": "user", "content": "Use bash if needed to inspect the repo"}]

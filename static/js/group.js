@@ -747,10 +747,15 @@ async function _sendRoundRobin(msg, box) {
   // is a pipeline: the first participant receives the user's prompt, and each
   // following participant receives the previous participant's answer.
   const order = _models.map((_, i) => i);
-  let turnInput = msg;
+  const originalTask = msg;
+  let previousName = '';
+  let previousOutput = '';
   for (let turn = 0; turn < order.length; turn++) {
     const idx = order[turn];
     const m = _models[idx];
+    const turnInput = turn === 0
+      ? originalTask
+      : _buildSequentialHandoff(originalTask, previousName, previousOutput);
 
     const wrap = _createGroupBubble(m, box);
     uiModule.scrollHistory();
@@ -760,12 +765,31 @@ async function _sendRoundRobin(msg, box) {
     await _streamToHolder(idx, _participantSessions[idx], turnInput, wrap, ac);
     _abortControllers = [];
 
-    const response = wrap.dataset.raw || '';
-    turnInput = response ? `[${m._groupName || m.display}]: ${response}` : turnInput;
+    previousName = m._groupName || m.display;
+    previousOutput = wrap.dataset.sequenceOutput || wrap.dataset.raw || '';
   }
   // _roundRobinIdx is left in state for backward compatibility with saved
   // sessions created before sequential mode became strict-order.
   _saveState();
+}
+
+function _truncateGroupHandoff(text, maxChars = 12000) {
+  const value = String(text || '').trim();
+  if (value.length <= maxChars) return value;
+  return value.slice(0, maxChars) + '\n[...handoff truncated]';
+}
+
+function _buildSequentialHandoff(originalTask, previousName, previousOutput) {
+  const prev = _truncateGroupHandoff(previousOutput || '[Previous participant produced no visible artifact.]');
+  return [
+    'Sequential group handoff.',
+    'Primary input: continue from the previous participant output below. Do not restart the workflow from scratch.',
+    `Previous participant (${previousName || 'previous agent'}) output:`,
+    prev,
+    'Original user task for context only:',
+    _truncateGroupHandoff(originalTask, 4000),
+    'Continue with your assigned role. If you need tools or MCP, call them with explicit non-empty arguments derived from the previous output and task context.',
+  ].join('\n\n');
 }
 
 /** After parallel responses, inject each model's response into all other sessions. */
@@ -820,6 +844,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
   let _buffer = '';
   let _firstToken = true;
   let hadError = false;
+  const toolTrace = [];
   const bodyEl = holderEl.querySelector('.body');
 
   try {
@@ -888,6 +913,10 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
           }
           // Agent tool events
           else if (json.type === 'tool_start') {
+            if (json.tool) {
+              const cmd = json.command ? ': ' + String(json.command).substring(0, 300) : '';
+              toolTrace.push(`TOOL ${json.tool}${cmd}`);
+            }
             const toolDiv = document.createElement('div');
             toolDiv.className = 'agent-tool-event';
             toolDiv.style.cssText = 'font-size:11px;opacity:0.5;padding:2px 0;font-family:monospace;';
@@ -895,6 +924,9 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
             bodyEl.appendChild(toolDiv);
           }
           else if (json.type === 'tool_output') {
+            if (json.output !== undefined) {
+              toolTrace.push(`OUTPUT ${String(json.output).substring(0, 1200)}`);
+            }
             const outDiv = document.createElement('div');
             outDiv.className = 'agent-tool-output';
             outDiv.style.cssText = 'font-size:10px;opacity:0.4;padding:2px 0;font-family:monospace;max-height:60px;overflow:hidden;';
@@ -915,6 +947,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
           // Error
           else if (json.error) {
             hadError = true;
+            toolTrace.push(`ERROR ${json.error}`);
             if (_firstToken) {
               _firstToken = false;
               if (holderEl._spinner) { holderEl._spinner.destroy(); delete holderEl._spinner; }
@@ -943,6 +976,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
     errDiv.style.cssText = 'color:var(--color-error);font-style:italic;padding:4px 0;';
     errDiv.textContent = `[Stream error: ${e.message || 'request failed'}]`;
     bodyEl.appendChild(errDiv);
+    toolTrace.push(`STREAM_ERROR ${e.message || 'request failed'}`);
   }
 
   // Final render with footer
@@ -957,6 +991,10 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
   }
 
   holderEl.dataset.raw = displayText;
+  const sequenceParts = [];
+  if (displayText) sequenceParts.push(displayText);
+  if (toolTrace.length) sequenceParts.push('Tool trace:\n' + toolTrace.join('\n'));
+  holderEl.dataset.sequenceOutput = _truncateGroupHandoff(sequenceParts.join('\n\n'));
   holderEl.dataset.groupModel = _models[modelIdx].mid;
 
   // Save response to parent session for persistence

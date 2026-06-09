@@ -196,35 +196,34 @@ def test_sequential_group_uses_previous_agent_output_as_next_input(node_availabl
     )
 
     out = _run_node(script)
-    assert out["streamInputs"] == [
-        {
-            "session": "sess-1",
-            "message": "initial prompt",
-            "mode": "agent",
-            "multiagent": "true",
-            "allowBash": "true",
-            "allowWebSearch": "true",
-            "workspace": "/Users/jakubsikora/Repos/personal/odysseus",
-        },
-        {
-            "session": "sess-2",
-            "message": "[Alpha]: agent-1-output",
-            "mode": "agent",
-            "multiagent": "true",
-            "allowBash": "true",
-            "allowWebSearch": "true",
-            "workspace": "/Users/jakubsikora/Repos/personal/odysseus",
-        },
-        {
-            "session": "sess-3",
-            "message": "[Beta]: agent-2-output",
-            "mode": "agent",
-            "multiagent": "true",
-            "allowBash": "true",
-            "allowWebSearch": "true",
-            "workspace": "/Users/jakubsikora/Repos/personal/odysseus",
-        },
-    ]
+    assert out["streamInputs"][0] == {
+        "session": "sess-1",
+        "message": "initial prompt",
+        "mode": "agent",
+        "multiagent": "true",
+        "allowBash": "true",
+        "allowWebSearch": "true",
+        "workspace": "/Users/jakubsikora/Repos/personal/odysseus",
+    }
+    assert out["streamInputs"][1]["session"] == "sess-2"
+    assert out["streamInputs"][1]["mode"] == "agent"
+    assert out["streamInputs"][1]["multiagent"] == "true"
+    assert out["streamInputs"][1]["allowBash"] == "true"
+    assert out["streamInputs"][1]["allowWebSearch"] == "true"
+    assert out["streamInputs"][1]["workspace"] == "/Users/jakubsikora/Repos/personal/odysseus"
+    assert "Sequential group handoff." in out["streamInputs"][1]["message"]
+    assert "Previous participant (Alpha) output:" in out["streamInputs"][1]["message"]
+    assert "agent-1-output" in out["streamInputs"][1]["message"]
+    assert "Original user task for context only:" in out["streamInputs"][1]["message"]
+    assert "initial prompt" in out["streamInputs"][1]["message"]
+
+    assert out["streamInputs"][2]["session"] == "sess-3"
+    assert out["streamInputs"][2]["mode"] == "agent"
+    assert out["streamInputs"][2]["multiagent"] == "true"
+    assert "Previous participant (Beta) output:" in out["streamInputs"][2]["message"]
+    assert "agent-2-output" in out["streamInputs"][2]["message"]
+    assert "Original user task for context only:" in out["streamInputs"][2]["message"]
+    assert "initial prompt" in out["streamInputs"][2]["message"]
     assert out["injectedSystemPrompts"]
     assert all(
         "trusted context from this current group run" in prompt

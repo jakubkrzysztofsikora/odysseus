@@ -1345,6 +1345,7 @@ def _allow_native_tool_schemas_for_non_api_model(
     endpoint_supports: Optional[bool],
     mcp_schemas: list,
     last_user: str,
+    force_all_mcp_tools: bool = False,
 ) -> bool:
     """Whether a fenced/text-tool model may still receive native MCP schemas.
 
@@ -1352,6 +1353,8 @@ def _allow_native_tool_schemas_for_non_api_model(
     clearly asking for MCP access we can expose MCP schemas and keep the
     missing-argument repair/retry guard as the safety net.
     """
+    if force_all_mcp_tools:
+        return bool(mcp_schemas)
     _last_content = (last_user or "").lower()
     return bool(mcp_schemas) and any(kw in _last_content for kw in _MCP_KEYWORDS)
 
@@ -1398,9 +1401,27 @@ _MCP_SEARCH_ARGUMENT_NAMES = frozenset({
 
 def _latest_user_text_for_tool_repair(messages: List[Dict], max_chars: int = 320) -> str:
     """Return the latest real user/workflow instruction, not tool-result echo."""
-    text = _recent_context_for_retrieval(messages, max_user=1, max_chars=max_chars)
+    text = _recent_context_for_retrieval(messages, max_user=3, max_chars=max_chars)
     text = re.sub(r"\s+", " ", text or "").strip()
     return text[:max_chars]
+
+
+def _latest_user_message_for_arg_repair(messages: List[Dict], max_chars: int = 50000) -> str:
+    """Return the latest real user/workflow message for explicit arg extraction."""
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                b.get("text", "") for b in content if isinstance(b, dict)
+            )
+        content = (content or "").strip()
+        if not content or content.startswith("[Tool execution results]"):
+            continue
+        text = re.sub(r"\s+", " ", content).strip()
+        return text[:max_chars]
+    return ""
 
 
 def _json_object_from_tool_content(content: str) -> Dict:
@@ -1511,6 +1532,26 @@ def _extract_explicit_bash_command(text: str) -> str:
         if not match:
             continue
         command = match.group(1).strip()
+        stop_markers = (
+            r"\s+(?=After\b)",
+            r"\s+(?=Then\b)",
+            r"\s+(?=Next\b)",
+            r"\s+(?=Finally\b)",
+            r"\s+(?=Once\b)",
+            r"\s+(?=When\b)",
+            r"\s+(?=Return\b)",
+            r"\s+(?=Answer\b)",
+            r"\s+(?=Summarize\b)",
+            r"\s+(?=Continue\b)",
+            r"\s+(?=Original\s+user\s+task\b)",
+        )
+        stops = [
+            m.start()
+            for marker in stop_markers
+            if (m := re.search(marker, command))
+        ]
+        if stops:
+            command = command[: min(stops)].rstrip()
         if command.endswith("."):
             command = command[:-1].rstrip()
         if len(command) >= 2 and command[0] == command[-1] and command[0] in {"'", '"', "`"}:
@@ -1540,7 +1581,7 @@ def _repair_empty_local_tool_blocks(tool_blocks: list, messages: List[Dict]) -> 
             continue
         if not bash_command:
             bash_command = _extract_explicit_bash_command(
-                _latest_user_text_for_tool_repair(messages, max_chars=800)
+                _latest_user_message_for_arg_repair(messages)
             )
         if not bash_command:
             repaired.append(block)
@@ -2256,6 +2297,7 @@ async def stream_agent_loop(
                     _endpoint_supports,
                     mcp_schemas,
                     _last_user,
+                    force_all_mcp_tools=force_all_mcp_tools,
                 )
                 else []
             )
