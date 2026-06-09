@@ -21,4 +21,6 @@ SMOKE_RESULT {'ok_mcp': True, 'ok_bash': True, 'ok_final': True, ...}
 
 Check the server log for the same marker. A passing run shows `Agent round 1` with MCP and Bash tool blocks, followed by `Agent round 2` with a final answer. It must not log missing required MCP arguments or `Tool 'bash' was called with empty arguments`.
 
+The text-tool parser accepts both raw MCP call forms: `mcp__server__tool{"query":"..."}` and `mcp__server__tool({"query":"..."})`. Empty parenthesized search calls are parsed, stripped from visible output, and repaired from the latest real user or group-agent instruction before dispatch.
+
 If using a temporary DB-created API token for local smoke, delete it after the run and do not print the raw token.

@@ -191,6 +191,28 @@ def test_raw_mcp_function_call_preserves_order_with_fenced_tools():
     assert strip_tool_blocks(text) == ""
 
 
+def test_parse_parenthesized_raw_mcp_function_call():
+    text = 'mcp__0ac61a6b__search({"query":"Circit AI"})```bash\npwd\n```'
+
+    blocks = parse_tool_blocks(text)
+
+    assert [b.tool_type for b in blocks] == ["mcp__0ac61a6b__search", "bash"]
+    assert json.loads(blocks[0].content) == {"query": "Circit AI"}
+    assert blocks[1].content == "pwd"
+    assert strip_tool_blocks(text) == ""
+
+
+def test_parse_empty_parenthesized_raw_mcp_search_call_for_repair():
+    text = 'Trying Atlassian: mcp__0ac61a6b__search()'
+
+    blocks = parse_tool_blocks(text)
+
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "mcp__0ac61a6b__search"
+    assert json.loads(blocks[0].content) == {}
+    assert strip_tool_blocks(text) == "Trying Atlassian:"
+
+
 @pytest.mark.asyncio
 async def test_empty_bash_tool_returns_error_instead_of_success(monkeypatch):
     monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda _owner: True)

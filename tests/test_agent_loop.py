@@ -31,6 +31,7 @@ from src.agent_loop import (
     _repair_empty_mcp_search_tool_blocks,
     ToolBlock,
 )
+from src.tool_parsing import parse_tool_blocks
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +409,16 @@ class TestMcpSearchArgumentRepair:
 
         assert json.loads(repaired[0].content) == {
             "query": "Find Circit compliance AI roadmap"
+        }
+
+    def test_parenthesized_empty_mcp_search_is_parsed_and_repaired(self):
+        messages = [{"role": "user", "content": "Use Atlassian MCP to fetch Circit AI business context"}]
+        blocks = parse_tool_blocks("mcp__0ac61a6b__search()")
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, None, messages)
+
+        assert json.loads(repaired[0].content) == {
+            "query": "Use Atlassian MCP to fetch Circit AI business context"
         }
 
     def test_non_search_mcp_tool_is_not_repaired_without_live_schema(self):

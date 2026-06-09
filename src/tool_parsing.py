@@ -71,6 +71,10 @@ _RAW_FUNCTION_CALL_RE = re.compile(
     r"(?<![\w.-])(?P<name>mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+|[A-Za-z_][\w.-]*)"
     r"[ \t]*(?:\\?[A-Za-z][A-Za-z0-9_.-]*)?[ \t]*(?=\{)"
 )
+_RAW_FUNCTION_CALL_PAREN_RE = re.compile(
+    r"(?<![\w.-])(?P<name>mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+|[A-Za-z_][\w.-]*)"
+    r"[ \t]*(?:\\?[A-Za-z][A-Za-z0-9_.-]*)?[ \t]*\("
+)
 
 # Pattern 5: DeepSeek DSML markup leaking into content. When deepseek
 # models can't emit structured tool_calls (e.g. we sent no tool schemas
@@ -354,12 +358,17 @@ def _raw_function_call_spans(text: str):
     call directly as content instead of using native `tool_calls`. Each match is
     still validated by function_call_to_tool_block; unknown names are dropped.
     """
-    if not isinstance(text, str) or "{" not in text:
+    if not isinstance(text, str) or ("{" not in text and "(" not in text):
         return []
 
     decoder = json.JSONDecoder()
     from src.tool_schemas import function_call_to_tool_block
     spans = []
+
+    def append_if_valid(start: int, end: int, name: str, args):
+        block = function_call_to_tool_block(name, json.dumps(args))
+        if block:
+            spans.append((start, end, block))
 
     for match in _RAW_FUNCTION_CALL_RE.finditer(text):
         name = match.group("name").lower()
@@ -367,9 +376,30 @@ def _raw_function_call_spans(text: str):
             args, end = decoder.raw_decode(text[match.end():])
         except json.JSONDecodeError:
             continue
-        block = function_call_to_tool_block(name, json.dumps(args))
-        if block:
-            spans.append((match.start(), match.end() + end, block))
+        append_if_valid(match.start(), match.end() + end, name, args)
+
+    for match in _RAW_FUNCTION_CALL_PAREN_RE.finditer(text):
+        name = match.group("name").lower()
+        body_start = match.end()
+        cursor = body_start
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor < len(text) and text[cursor] == ")":
+            append_if_valid(match.start(), cursor + 1, name, {})
+            continue
+        if cursor >= len(text) or text[cursor] != "{":
+            continue
+        try:
+            args, end = decoder.raw_decode(text[cursor:])
+        except json.JSONDecodeError:
+            continue
+        close = cursor + end
+        probe = close
+        while probe < len(text) and text[probe].isspace():
+            probe += 1
+        if probe >= len(text) or text[probe] != ")":
+            continue
+        append_if_valid(match.start(), probe + 1, name, args)
     return spans
 
 
@@ -543,41 +573,30 @@ def _parse_mcp_alias_fenced_blocks(text: str) -> List[ToolBlock]:
 
 
 def _strip_raw_function_calls(text: str) -> str:
-    if not isinstance(text, str) or "{" not in text:
+    if not isinstance(text, str):
         return "" if text is None else text
 
-    decoder = json.JSONDecoder()
-    spans = []
-    for match in _RAW_FUNCTION_CALL_RE.finditer(text):
-        name = match.group("name").lower()
-        try:
-            args, end = decoder.raw_decode(text[match.end():])
-        except json.JSONDecodeError:
-            continue
-
-        from src.tool_schemas import function_call_to_tool_block
-        if not function_call_to_tool_block(name, json.dumps(args)):
-            continue
-
-        abs_end = match.end() + end
-        line_start = text.rfind("\n", 0, match.start()) + 1
-        line_end = text.find("\n", abs_end)
-        if line_end < 0:
-            line_end = len(text)
-        prefix = text[line_start:match.start()].strip()
-        suffix = text[abs_end:line_end].strip()
-        if not prefix and not suffix:
-            span_end = line_end + (1 if line_end < len(text) else 0)
-            spans.append((line_start, span_end))
-        else:
-            spans.append((match.start(), abs_end))
-
+    spans = _raw_function_call_spans(text)
     if not spans:
         return text
 
+    clean_spans = []
+    for start, abs_end, _block in spans:
+        line_start = text.rfind("\n", 0, start) + 1
+        line_end = text.find("\n", abs_end)
+        if line_end < 0:
+            line_end = len(text)
+        prefix = text[line_start:start].strip()
+        suffix = text[abs_end:line_end].strip()
+        if not prefix and not suffix:
+            span_end = line_end + (1 if line_end < len(text) else 0)
+            clean_spans.append((line_start, span_end))
+        else:
+            clean_spans.append((start, abs_end))
+
     cleaned_parts = []
     cursor = 0
-    for start, end in spans:
+    for start, end in clean_spans:
         cleaned_parts.append(text[cursor:start])
         cursor = end
     cleaned_parts.append(text[cursor:])
