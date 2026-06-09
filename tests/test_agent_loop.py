@@ -21,6 +21,11 @@ from src.agent_loop import (
     _append_tool_results,
     _allow_native_tool_schemas_for_non_api_model,
     _include_mcp_schema_names,
+    _mcp_prompt_requested,
+    _mcp_prompt_cache_signature,
+    _mcp_target_hints,
+    _prompt_visible_mcp_tools,
+    _build_mcp_target_message,
     _record_empty_argument_tool_call,
 )
 
@@ -195,6 +200,103 @@ class TestMcpToolVisibility:
             self._schemas(),
             "write a short poem",
         ) is False
+
+    def test_mcp_prompt_wait_detects_targeted_mcp_requests(self):
+        assert _mcp_prompt_requested("Use Atlassian MCP to search Jira", False) is True
+        assert _mcp_target_hints("Use Atlassian MCP to search Jira") == {
+            "atlassian",
+            "0ac61a6b",
+        }
+        assert _mcp_prompt_requested("write a short poem", False) is False
+        assert _mcp_prompt_requested("write a short poem", True) is True
+
+    def test_prompt_visible_mcp_tools_skips_builtin_python_servers(self):
+        class DummyMcp:
+            def get_all_tools(self, _disabled):
+                return [
+                    {"server_id": "rag", "server_name": "RAG", "qualified_name": "mcp__rag__search"},
+                    {"server_id": "builtin_browser", "server_name": "Browser", "qualified_name": "mcp__builtin_browser__navigate"},
+                    {"server_id": "0ac61a6b", "server_name": "Atlassian", "qualified_name": "mcp__0ac61a6b__search"},
+                ]
+
+            def is_builtin(self, server_id):
+                return server_id in {"rag", "builtin_browser"}
+
+        visible = _prompt_visible_mcp_tools(DummyMcp(), {})
+
+        assert [t["qualified_name"] for t in visible] == [
+            "mcp__builtin_browser__navigate",
+            "mcp__0ac61a6b__search",
+        ]
+
+    def test_mcp_prompt_cache_signature_tracks_generation_and_visible_tools(self):
+        class DummyMcp:
+            _generation = 1
+
+            def __init__(self, tools):
+                self._tools = tools
+
+            def get_all_tools(self, _disabled):
+                return self._tools
+
+            def is_builtin(self, server_id):
+                return server_id in {"rag", "builtin_browser"}
+
+        first = DummyMcp([
+            {"server_id": "0ac61a6b", "server_name": "Atlassian", "qualified_name": "mcp__0ac61a6b__search", "name": "search"},
+        ])
+        second = DummyMcp([
+            {"server_id": "0ac61a6b", "server_name": "Atlassian", "qualified_name": "mcp__0ac61a6b__search", "name": "search"},
+        ])
+        second._generation = 2
+        third = DummyMcp([
+            {"server_id": "0ac61a6b", "server_name": "Atlassian", "qualified_name": "mcp__0ac61a6b__search", "name": "search"},
+            {"server_id": "circitron", "server_name": "Circitron", "qualified_name": "mcp__circitron__ping", "name": "ping"},
+        ])
+
+        assert _mcp_prompt_cache_signature(first, {}) != _mcp_prompt_cache_signature(second, {})
+        assert _mcp_prompt_cache_signature(first, {}) != _mcp_prompt_cache_signature(third, {})
+
+    def test_mcp_target_message_surfaces_exact_callable_names(self):
+        class DummyMcp:
+            def get_all_tools(self, _disabled):
+                return [
+                    {
+                        "server_id": "0ac61a6b",
+                        "server_name": "Atlassian",
+                        "qualified_name": "mcp__0ac61a6b__search",
+                        "name": "search",
+                        "description": "Search Atlassian",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                        },
+                    },
+                    {
+                        "server_id": "circitron",
+                        "server_name": "Circitron",
+                        "qualified_name": "mcp__circitron__ping",
+                        "name": "ping",
+                        "description": "Ping",
+                        "input_schema": {},
+                    },
+                ]
+
+            def is_builtin(self, server_id):
+                return False
+
+        msg = _build_mcp_target_message(
+            DummyMcp(),
+            {},
+            "Use Atlassian MCP to search Circit AI",
+            force_all_mcp_tools=False,
+        )
+
+        assert msg["role"] == "system"
+        assert "do not say it is unavailable" in msg["content"]
+        assert 'mcp__0ac61a6b__search{"query":"real non-empty value"}' in msg["content"]
+        assert "mcp__circitron__ping" not in msg["content"]
 
 
 # ---------------------------------------------------------------------------

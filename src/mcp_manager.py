@@ -117,6 +117,11 @@ def _format_mcp_params(input_schema: Any) -> str:
     return hint
 
 
+def _mcp_prompt_alias(value: Any) -> str:
+    """Normalize a server name/id into a fence-tag alias the parser accepts."""
+    return re.sub(r"[^a-z0-9_.-]+", "", str(value or "").lower())
+
+
 def _exception_text(error: BaseException) -> str:
     message = str(error).strip()
     if message:
@@ -631,12 +636,30 @@ class McpManager:
         finally:
             db.close()
 
+        if configs:
+            for config in configs:
+                self._connections[config["server_id"]] = {
+                    "status": "connecting",
+                    "name": config["name"],
+                }
+            self._generation += 1
+
         async def _connect_one(config: Dict[str, Any]) -> bool:
             try:
-                return await asyncio.wait_for(
+                ok = await asyncio.wait_for(
                     self.connect_server(**config),
                     timeout=per_server_timeout,
                 )
+                if not ok:
+                    current = self._connections.get(config["server_id"], {})
+                    if current.get("status") == "connecting":
+                        self._connections[config["server_id"]] = {
+                            "status": "error",
+                            "error": "Connection failed",
+                            "name": config["name"],
+                        }
+                        self._generation += 1
+                return ok
             except asyncio.TimeoutError:
                 logger.warning(
                     "MCP startup timed out for %s (%s) after %.1fs",
@@ -1064,7 +1087,16 @@ class McpManager:
         if not tools:
             return ""
 
-        lines = ["\n\nYou also have access to external MCP tool servers. These tools are called via native function calling:"]
+        lines = [
+            "\n\nYou also have access to external MCP tool servers.",
+            "The listed MCP tools are available in this Odysseus session; do not claim one is unavailable when it is listed below.",
+            "When native function schemas are available, call MCP tools through those schemas.",
+            "When you are using text tools, call an MCP tool by writing one raw function-call line exactly like:",
+            'mcp__server_id__tool_name{"required_arg":"real non-empty value"}',
+            "For a search server, a server-alias fenced block is also accepted, for example:",
+            '```atlassian\n{"query":"real non-empty search text"}\n```',
+            "Never call MCP tools with `{}` or blank required arguments.",
+        ]
         by_server = {}
         for t in tools:
             # Skip builtin Python servers — they're already in the agent prompt
@@ -1087,6 +1119,16 @@ class McpManager:
             identity = self._connections.get(sid, {}).get("identity", "")
             label = f"{server_name} ({identity})" if identity else server_name
             lines.append(f"\n**{label}:**")
+            aliases = sorted({
+                alias
+                for alias in (
+                    _mcp_prompt_alias(sid),
+                    _mcp_prompt_alias(server_name),
+                )
+                if alias
+            })
+            if aliases:
+                lines.append(f"  Server aliases for text-tool fallback: {', '.join(aliases)}")
             for t in server_tools:
                 # Truncate long descriptions
                 desc = t['description'][:120] + '...' if len(t['description']) > 120 else t['description']

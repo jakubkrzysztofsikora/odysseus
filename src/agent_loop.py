@@ -478,6 +478,12 @@ _API_HOSTS = frozenset([
 ])
 _MCP_KEYWORDS = frozenset(["mcp", "browse", "browser", "website", "calendar", "event", "email",
                            "gmail", "screenshot", "navigate", "click", "miniflux", "rss", "feed"])
+_MCP_TARGET_HINTS = (
+    (("atlassian", "jira", "confluence", "rovo"), ("atlassian", "0ac61a6b")),
+    (("circitron",), ("circitron",)),
+    (("browser", "browse", "website", "screenshot", "navigate", "click"), ("browser", "builtin_browser")),
+    (("health hub", "health-hub"), ("health", "health-hub")),
+)
 _ADMIN_SCHEMA_NAMES = frozenset([
     "manage_session", "manage_skills", "manage_tasks",
     "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
@@ -590,6 +596,202 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
             break
     return "\n".join(collected)[:max_chars]
 
+
+def _mcp_prompt_requested(query: str, force_all_mcp_tools: bool) -> bool:
+    if force_all_mcp_tools:
+        return True
+    ql = (query or "").lower()
+    return bool(ql) and any(kw in ql for kw in _MCP_KEYWORDS)
+
+
+def _mcp_target_hints(query: str) -> Set[str]:
+    ql = (query or "").lower()
+    targets: Set[str] = set()
+    for triggers, hints in _MCP_TARGET_HINTS:
+        if any(trigger in ql for trigger in triggers):
+            targets.update(hints)
+    return targets
+
+
+def _prompt_visible_mcp_tools(mcp_mgr, disabled_map: Dict[str, set]) -> List[Dict]:
+    try:
+        tools = mcp_mgr.get_all_tools(disabled_map or {})
+    except Exception:
+        return []
+    visible = []
+    for tool in tools or []:
+        try:
+            server_id = str(tool.get("server_id") or "")
+            if tool.get("is_disabled"):
+                continue
+            if mcp_mgr.is_builtin(server_id) and server_id != "builtin_browser":
+                continue
+            visible.append(tool)
+        except Exception:
+            continue
+    return visible
+
+
+def _mcp_prompt_cache_signature(mcp_mgr, disabled_map: Dict[str, set]):
+    """Return a stable signature for MCP tools visible in text prompts."""
+    if not mcp_mgr:
+        return None
+    try:
+        generation = getattr(mcp_mgr, "_generation", None)
+    except Exception:
+        generation = None
+    visible = []
+    for tool in _prompt_visible_mcp_tools(mcp_mgr, disabled_map or {}):
+        visible.append((
+            str(tool.get("server_id") or ""),
+            str(tool.get("server_name") or ""),
+            str(tool.get("qualified_name") or ""),
+            str(tool.get("name") or ""),
+        ))
+    return generation, tuple(sorted(visible))
+
+
+def _mcp_targets_ready(mcp_mgr, disabled_map: Dict[str, set], targets: Set[str]) -> bool:
+    if not targets:
+        return False
+    haystack = []
+    for tool in _prompt_visible_mcp_tools(mcp_mgr, disabled_map):
+        haystack.extend([
+            str(tool.get("server_id") or ""),
+            str(tool.get("server_name") or ""),
+            str(tool.get("qualified_name") or ""),
+            str(tool.get("name") or ""),
+        ])
+    try:
+        for server_id, status in (mcp_mgr.get_all_statuses() or {}).items():
+            if isinstance(status, dict) and status.get("status") == "connected":
+                haystack.extend([str(server_id), str(status.get("name") or "")])
+    except Exception:
+        pass
+    text = "\n".join(haystack).lower()
+    return any(target.lower() in text for target in targets)
+
+
+def _mcp_prompt_arg_example(input_schema: Dict) -> Dict[str, str]:
+    if not isinstance(input_schema, dict):
+        return {"query": "real non-empty value"}
+    props = input_schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return {"query": "real non-empty value"}
+    required = input_schema.get("required")
+    names = [str(n) for n in required if str(n) in props] if isinstance(required, list) else []
+    if not names:
+        names = [str(n) for n in props.keys()]
+    return {name: "real non-empty value" for name in names[:3]}
+
+
+def _build_mcp_target_message(
+    mcp_mgr,
+    disabled_map: Dict[str, set],
+    query: str,
+    *,
+    force_all_mcp_tools: bool,
+) -> Optional[Dict]:
+    if not mcp_mgr or not _mcp_prompt_requested(query, force_all_mcp_tools):
+        return None
+    targets = _mcp_target_hints(query)
+    tools = _prompt_visible_mcp_tools(mcp_mgr, disabled_map or {})
+    if targets:
+        filtered = []
+        for tool in tools:
+            fields = "\n".join(
+                str(tool.get(key) or "")
+                for key in ("server_id", "server_name", "qualified_name", "name", "description")
+            ).lower()
+            if any(target.lower() in fields for target in targets):
+                filtered.append(tool)
+        tools = filtered
+    if not tools:
+        return None
+
+    def priority(tool: Dict):
+        name = str(tool.get("name") or "").lower()
+        qualified = str(tool.get("qualified_name") or "").lower()
+        desc = str(tool.get("description") or "").lower()
+        search_rank = 0 if name == "search" else (1 if "search" in name or "search" in desc else 2)
+        return (search_rank, qualified)
+
+    selected = sorted(tools, key=priority)[:12]
+    lines = [
+        "MCP TARGET TOOLS FOR THIS REQUEST:",
+        "These MCP tools are connected and available. If the user asked for one of these servers/tools, call it; do not say it is unavailable.",
+        "For text-tool models, write one raw function-call line with non-empty JSON arguments, for example:",
+    ]
+    for tool in selected:
+        qualified = str(tool.get("qualified_name") or "")
+        if not qualified.startswith("mcp__"):
+            qualified = f"mcp__{tool.get('server_id')}__{tool.get('name')}"
+        example = _mcp_prompt_arg_example(tool.get("input_schema") or {})
+        lines.append(f"- {qualified}{json.dumps(example, separators=(',', ':'))}  # {tool.get('server_name')}")
+    return {"role": "system", "content": "\n".join(lines), "_protected": True}
+
+
+async def _wait_for_requested_mcp_tools(
+    mcp_mgr,
+    disabled_map: Dict[str, set],
+    query: str,
+    *,
+    force_all_mcp_tools: bool,
+) -> float:
+    """Briefly wait for startup MCP connections before freezing the prompt.
+
+    Text-tool models (including chatgpt/* subscription routes) rely on the MCP
+    tool list in the prompt because we intentionally do not send native MCP
+    schemas to them. If a request lands during app startup, building the prompt
+    a few hundred milliseconds too early makes those models improvise malformed
+    raw JSON instead of valid MCP calls.
+    """
+    if not mcp_mgr or not _mcp_prompt_requested(query, force_all_mcp_tools):
+        return 0.0
+    try:
+        timeout = float(get_setting("agent_mcp_prompt_wait_seconds", 8) or 0)
+    except (TypeError, ValueError):
+        timeout = 8.0
+    timeout = max(0.0, min(timeout, 12.0))
+    if timeout <= 0:
+        return 0.0
+
+    start = time.time()
+    targets = _mcp_target_hints(query)
+    sleep_s = 0.15
+    while time.time() - start < timeout:
+        visible_tools = _prompt_visible_mcp_tools(mcp_mgr, disabled_map)
+        try:
+            statuses = mcp_mgr.get_all_statuses() or {}
+        except Exception:
+            statuses = {}
+        pending = any(
+            isinstance(status, dict) and status.get("status") == "connecting"
+            for status in statuses.values()
+        )
+
+        if targets:
+            if _mcp_targets_ready(mcp_mgr, disabled_map, targets):
+                break
+        elif visible_tools and not pending:
+            break
+        elif visible_tools and not force_all_mcp_tools and time.time() - start >= 1.5:
+            break
+        elif statuses and not pending and time.time() - start >= 0.75:
+            break
+
+        await asyncio.sleep(sleep_s)
+
+    waited = time.time() - start
+    if waited >= 0.05:
+        logger.info(
+            "[agent] waited %.2fs for requested MCP prompt tools (targets=%s visible=%d)",
+            waited,
+            sorted(targets) if targets else "any",
+            len(_prompt_visible_mcp_tools(mcp_mgr, disabled_map)),
+        )
+    return waited
+
 def _build_system_prompt(
     messages: List[Dict],
     model: str,
@@ -601,6 +803,7 @@ def _build_system_prompt(
     mcp_disabled_map: Optional[Dict[str, set]] = None,
     compact: bool = False,
     owner: Optional[str] = None,
+    force_all_mcp_tools: bool = False,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -615,7 +818,8 @@ def _build_system_prompt(
         _ov_sig = _hl.sha256(_json.dumps(get_builtin_overrides() or {}, sort_keys=True).encode()).hexdigest()
     except Exception:
         _ov_sig = ""
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig)
+    _mcp_sig = _mcp_prompt_cache_signature(mcp_mgr, mcp_disabled_map or {})
+    cache_key = (frozenset(disabled_tools or []), _mcp_sig, needs_admin, _rt_key, compact, _ov_sig)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
@@ -657,6 +861,12 @@ def _build_system_prompt(
     # prompt) so the context trimmer doesn't destroy it when truncating the
     # massive tool-description system prompt.
     _doc_message = None
+    _mcp_target_message = _build_mcp_target_message(
+        mcp_mgr,
+        mcp_disabled_map or {},
+        _extract_last_user_message(messages),
+        force_all_mcp_tools=force_all_mcp_tools,
+    )
     # Matched-skills block: same treatment (separate user-role message with
     # metadata.trusted=False) so user-editable skill content can't inject into
     # the trusted system role. Bound up front so the insert block below can
@@ -983,6 +1193,9 @@ def _build_system_prompt(
     if _doc_message:
         merged.insert(last_user_idx, _doc_message)
         last_user_idx += 1  # the document message is now at last_user_idx
+    if _mcp_target_message:
+        merged.insert(last_user_idx, _mcp_target_message)
+        last_user_idx += 1
     if _skills_message:
         merged.insert(last_user_idx, _skills_message)
 
@@ -1515,6 +1728,15 @@ async def stream_agent_loop(
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
     prep_timings["request_setup"] = time.time() - _t0
 
+    _t_mcp_wait = time.time()
+    await _wait_for_requested_mcp_tools(
+        mcp_mgr,
+        _mcp_disabled_map,
+        _retrieval_query,
+        force_all_mcp_tools=force_all_mcp_tools,
+    )
+    prep_timings["mcp_wait"] = time.time() - _t_mcp_wait
+
     # RAG-based tool selection: retrieve relevant tools for this query.
     # If caller provided a pre-computed set (e.g. task_scheduler), use that.
     _relevant_tools = relevant_tools
@@ -1653,6 +1875,7 @@ async def stream_agent_loop(
         mcp_disabled_map=_mcp_disabled_map,
         compact=_is_api_model,
         owner=owner,
+        force_all_mcp_tools=force_all_mcp_tools,
     )
     _relevant_tools = _include_mcp_schema_names(
         _relevant_tools,

@@ -45,6 +45,15 @@ def test_prompt_descriptions_surface_param_names_and_required():
     assert "required" in text                   # required-ness is surfaced
 
 
+def test_prompt_descriptions_tell_text_models_mcp_is_available():
+    text = _mgr_with_tool().get_tool_descriptions_for_prompt()
+
+    assert "do not claim one is unavailable" in text
+    assert "mcp__server_id__tool_name" in text
+    assert "Server aliases for text-tool fallback: files, srv1" in text
+    assert "Never call MCP tools with `{}`" in text
+
+
 def test_format_mcp_params_handles_no_params():
     from src.mcp_manager import _format_mcp_params
 

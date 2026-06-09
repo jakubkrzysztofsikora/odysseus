@@ -23,6 +23,10 @@ _TOOL_BLOCK_RE = re.compile(
     r"```(" + "|".join(TOOL_TAGS) + r")\s*\n([\s\S]*?)```",
     re.IGNORECASE,
 )
+_FENCED_BLOCK_RE = re.compile(
+    r"```(?P<tag>[A-Za-z][\w.-]*)\s*\n(?P<content>[\s\S]*?)```",
+    re.IGNORECASE,
+)
 
 # Pattern 2: [TOOL_CALL] ... [/TOOL_CALL] blocks (some models use this format)
 # Matches: {tool => "shell", args => {--command "ls -la"}} etc.
@@ -343,30 +347,199 @@ def _parse_tool_code_block(raw: str) -> Optional[ToolBlock]:
     return None
 
 
-def _parse_raw_function_calls(text: str) -> List[ToolBlock]:
+def _raw_function_call_spans(text: str):
     """Parse raw single-line function calls emitted in assistant content.
 
     This catches provider/runtime leaks where the model writes the function
     call directly as content instead of using native `tool_calls`. Each match is
     still validated by function_call_to_tool_block; unknown names are dropped.
     """
-    blocks: List[ToolBlock] = []
     if not isinstance(text, str) or "{" not in text:
-        return blocks
+        return []
 
     decoder = json.JSONDecoder()
     from src.tool_schemas import function_call_to_tool_block
+    spans = []
 
     for match in _RAW_FUNCTION_CALL_RE.finditer(text):
         name = match.group("name").lower()
         try:
-            args, _end = decoder.raw_decode(text[match.end():])
+            args, end = decoder.raw_decode(text[match.end():])
         except json.JSONDecodeError:
             continue
         block = function_call_to_tool_block(name, json.dumps(args))
         if block:
-            blocks.append(block)
-    return blocks
+            spans.append((match.start(), match.end() + end, block))
+    return spans
+
+
+def _parse_raw_function_calls(text: str) -> List[ToolBlock]:
+    return [block for _start, _end, block in _raw_function_call_spans(text)]
+
+
+_BARE_JSON_TOOL_NAME_KEYS = ("tool", "tool_name", "name", "function")
+_BARE_JSON_ARGUMENT_KEYS = ("arguments", "args", "parameters")
+_BARE_JSON_BASH_KEYS = ("cmd", "command", "shell_command")
+
+
+def _bare_json_object_to_tool_block(obj: dict) -> Optional[ToolBlock]:
+    """Convert a standalone JSON object into a tool block when unambiguous."""
+    if not isinstance(obj, dict):
+        return None
+
+    from src.tool_schemas import function_call_to_tool_block
+
+    tool_name = None
+    for key in _BARE_JSON_TOOL_NAME_KEYS:
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            tool_name = value.strip()
+            break
+    if tool_name:
+        args = None
+        for key in _BARE_JSON_ARGUMENT_KEYS:
+            if key in obj:
+                args = obj.get(key)
+                break
+        if args is None:
+            excluded = set(_BARE_JSON_TOOL_NAME_KEYS)
+            args = {k: v for k, v in obj.items() if k not in excluded}
+        return function_call_to_tool_block(tool_name, json.dumps(args if args is not None else {}))
+
+    for key in _BARE_JSON_BASH_KEYS:
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            return ToolBlock("bash", value.strip())
+
+    return None
+
+
+def _bare_json_tool_spans(text: str):
+    if not isinstance(text, str) or "{" not in text:
+        return []
+    decoder = json.JSONDecoder()
+    spans = []
+    i = 0
+    while i < len(text):
+        start = text.find("{", i)
+        if start < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            i = start + 1
+            continue
+        block = _bare_json_object_to_tool_block(obj) if isinstance(obj, dict) else None
+        if block:
+            spans.append((start, start + end, block))
+            i = start + end
+        else:
+            i = start + 1
+    return spans
+
+
+def _parse_bare_json_tool_objects(text: str) -> List[ToolBlock]:
+    """Parse provider fallbacks like {"cmd": "pwd"} emitted as content."""
+    return [block for _start, _end, block in _bare_json_tool_spans(text)]
+
+
+def _norm_mcp_alias(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _mcp_alias_fence_to_tool_block(tag: str, content: str) -> Optional[ToolBlock]:
+    """Map ```atlassian {"query": "..."} ``` style fallbacks to MCP tools."""
+    tag_norm = _norm_mcp_alias(tag)
+    if not tag_norm or tag_norm in {t.lower() for t in TOOL_TAGS}:
+        return None
+    try:
+        args = json.loads((content or "").strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(args, dict):
+        return None
+
+    explicit_name = args.get("tool") or args.get("tool_name") or args.get("name") or args.get("function")
+    if isinstance(explicit_name, str) and explicit_name.strip():
+        tool_args = args.get("arguments", args.get("args", args.get("parameters", {})))
+        from src.tool_schemas import function_call_to_tool_block
+        return function_call_to_tool_block(explicit_name.strip(), json.dumps(tool_args or {}))
+
+    try:
+        from src import agent_tools
+
+        mcp = agent_tools.get_mcp_manager()
+        if not mcp:
+            return None
+        all_tools = mcp.get_all_tools({}) or []
+        explicit_tag_match = None
+        for tool in all_tools:
+            server_id = str(tool.get("server_id") or "")
+            server_name = str(tool.get("server_name") or "")
+            tool_name = str(tool.get("name") or "")
+            qualified = str(tool.get("qualified_name") or "")
+            aliases = {
+                "mcp" + _norm_mcp_alias(server_id) + _norm_mcp_alias(tool_name),
+                "mcp" + _norm_mcp_alias(server_name) + _norm_mcp_alias(tool_name),
+                _norm_mcp_alias(qualified),
+            }
+            if tag_norm in aliases:
+                explicit_tag_match = tool
+                break
+        if explicit_tag_match:
+            qualified = str(explicit_tag_match.get("qualified_name") or "")
+            if not qualified.startswith("mcp__"):
+                qualified = f"mcp__{explicit_tag_match.get('server_id')}__{explicit_tag_match.get('name')}"
+            if hasattr(mcp, "coerce_tool_arguments"):
+                args = mcp.coerce_tool_arguments(qualified, args)
+            return ToolBlock(qualified, json.dumps(args) if args else "{}")
+
+        candidates = []
+        for tool in all_tools:
+            server_id = str(tool.get("server_id") or "")
+            server_name = str(tool.get("server_name") or "")
+            if tag_norm not in {
+                _norm_mcp_alias(server_id),
+                _norm_mcp_alias(server_name),
+            }:
+                continue
+            candidates.append(tool)
+        if not candidates:
+            return None
+        preferred = None
+        if any(k in args for k in ("query", "q", "search")):
+            preferred = next((t for t in candidates if str(t.get("name") or "").lower() == "search"), None)
+            preferred = preferred or next((t for t in candidates if "search" in str(t.get("name") or "").lower()), None)
+        preferred = preferred or (candidates[0] if len(candidates) == 1 else None)
+        if not preferred:
+            return None
+        qualified = str(preferred.get("qualified_name") or "")
+        if not qualified.startswith("mcp__"):
+            qualified = f"mcp__{preferred.get('server_id')}__{preferred.get('name')}"
+        if hasattr(mcp, "coerce_tool_arguments"):
+            args = mcp.coerce_tool_arguments(qualified, args)
+        return ToolBlock(qualified, json.dumps(args) if args else "{}")
+    except Exception as e:
+        logger.debug("MCP alias fence parsing failed for %s: %s", tag, e)
+        return None
+
+
+def _mcp_alias_fence_spans(text: str):
+    if not isinstance(text, str) or "```" not in text:
+        return []
+    spans = []
+    for match in _FENCED_BLOCK_RE.finditer(text):
+        tag = match.group("tag")
+        if tag.lower() in {t.lower() for t in TOOL_TAGS}:
+            continue
+        block = _mcp_alias_fence_to_tool_block(tag, match.group("content"))
+        if block:
+            spans.append((match.start(), match.end(), block))
+    return spans
+
+
+def _parse_mcp_alias_fenced_blocks(text: str) -> List[ToolBlock]:
+    return [block for _start, _end, block in _mcp_alias_fence_spans(text)]
 
 
 def _strip_raw_function_calls(text: str) -> str:
@@ -411,6 +584,44 @@ def _strip_raw_function_calls(text: str) -> str:
     return "".join(cleaned_parts)
 
 
+def _strip_bare_json_tool_objects(text: str) -> str:
+    spans = _bare_json_tool_spans(text)
+    if not spans:
+        return text
+    cleaned_parts = []
+    cursor = 0
+    for start, end, _block in spans:
+        line_start = text.rfind("\n", 0, start) + 1
+        line_end = text.find("\n", end)
+        if line_end < 0:
+            line_end = len(text)
+        prefix = text[line_start:start].strip()
+        suffix = text[end:line_end].strip()
+        if not prefix and not suffix:
+            span_start = line_start
+            span_end = line_end + (1 if line_end < len(text) else 0)
+        else:
+            span_start = start
+            span_end = end
+        cleaned_parts.append(text[cursor:span_start])
+        cursor = span_end
+    cleaned_parts.append(text[cursor:])
+    return "".join(cleaned_parts)
+
+
+def _strip_mcp_alias_fenced_blocks(text: str) -> str:
+    spans = _mcp_alias_fence_spans(text)
+    if not spans:
+        return text
+    cleaned_parts = []
+    cursor = 0
+    for start, end, _block in spans:
+        cleaned_parts.append(text[cursor:start])
+        cursor = end
+    cleaned_parts.append(text[cursor:])
+    return "".join(cleaned_parts)
+
+
 def parse_tool_blocks(text: str) -> List[ToolBlock]:
     """Extract executable tool blocks from LLM response text.
 
@@ -421,6 +632,7 @@ def parse_tool_blocks(text: str) -> List[ToolBlock]:
     4. <tool_code> blocks (MiniMax-M2.5 style)
     5. DeepSeek DSML markup (normalized to <invoke> first)
     6. Raw native function-call lines leaked into assistant content
+    7. Bare JSON tool objects leaked into assistant content
     """
     blocks = []
 
@@ -428,7 +640,9 @@ def parse_tool_blocks(text: str) -> List[ToolBlock]:
     # XML patterns below catch it.
     text = _normalize_dsml(text)
 
-    # Pattern 1: fenced code blocks
+    # Pattern 1 plus content-leaked function calls. Collect spans first so
+    # mixed formats execute in the same order the model emitted them.
+    block_spans = []
     for m in _TOOL_BLOCK_RE.finditer(text):
         tag = m.group(1).lower()
         content = m.group(2).strip()
@@ -441,11 +655,27 @@ def parse_tool_blocks(text: str) -> List[ToolBlock]:
             for inv in _XML_INVOKE_RE.finditer(content):
                 block = _parse_xml_invoke(inv)
                 if block:
-                    blocks.append(block)
+                    block_spans.append((m.start(), m.end(), block))
                     invoked = True
             if invoked:
                 continue
-        blocks.append(ToolBlock(tag, content))
+        block_spans.append((m.start(), m.end(), ToolBlock(tag, content)))
+
+    block_spans.extend(_mcp_alias_fence_spans(text))
+
+    def overlaps_existing(start: int, end: int) -> bool:
+        return any(start < span_end and end > span_start for span_start, span_end, _ in block_spans)
+
+    for start, end, block in _raw_function_call_spans(text):
+        if not overlaps_existing(start, end):
+            block_spans.append((start, end, block))
+
+    for start, end, block in _bare_json_tool_spans(text):
+        if not overlaps_existing(start, end):
+            block_spans.append((start, end, block))
+
+    if block_spans:
+        blocks.extend(block for _start, _end, block in sorted(block_spans, key=lambda item: item[0]))
 
     # Pattern 2: [TOOL_CALL] blocks (only if no fenced blocks found)
     if not blocks:
@@ -476,10 +706,6 @@ def parse_tool_blocks(text: str) -> List[ToolBlock]:
             if block:
                 blocks.append(block)
 
-    # Pattern 6: raw native function-call lines
-    if not blocks:
-        blocks.extend(_parse_raw_function_calls(text))
-
     return blocks
 
 
@@ -489,11 +715,13 @@ def strip_tool_blocks(text: str) -> str:
     # / <tool_call> removers below instead of leaking to the user.
     text = _normalize_dsml(text)
     cleaned = _TOOL_BLOCK_RE.sub('', text)
+    cleaned = _strip_mcp_alias_fenced_blocks(cleaned)
     cleaned = _TOOL_CALL_RE.sub('', cleaned)
     cleaned = _XML_TOOL_CALL_RE.sub('', cleaned)
     cleaned = _TOOL_CODE_RE.sub('', cleaned)
     # Strip bare <invoke> blocks not wrapped in <tool_call>
     cleaned = re.sub(r'<invoke\s+name=["\'].*?</invoke>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
     cleaned = _strip_raw_function_calls(cleaned)
+    cleaned = _strip_bare_json_tool_objects(cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()

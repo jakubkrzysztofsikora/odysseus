@@ -96,6 +96,101 @@ def test_parse_raw_mcp_function_call_inline_with_lowercase_suffix():
     assert strip_tool_blocks(text) == "Searching now:"
 
 
+def test_parse_bare_json_bash_command_objects():
+    text = '{"cmd": "pwd && ls", "timeout": 120000}{"command": "git status --short"}'
+
+    blocks = parse_tool_blocks(text)
+
+    assert [b.tool_type for b in blocks] == ["bash", "bash"]
+    assert [b.content for b in blocks] == ["pwd && ls", "git status --short"]
+    assert strip_tool_blocks(text) == ""
+
+
+def test_parse_bare_json_named_tool_object():
+    text = 'Inspecting now {"tool": "bash", "arguments": {"cmd": "git diff --stat"}}'
+
+    blocks = parse_tool_blocks(text)
+
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "bash"
+    assert blocks[0].content == "git diff --stat"
+    assert strip_tool_blocks(text) == "Inspecting now"
+
+
+def test_bare_json_without_tool_intent_is_not_executable_or_stripped():
+    text = '{"status": "ok", "items": [1, 2, 3]}'
+
+    assert parse_tool_blocks(text) == []
+    assert strip_tool_blocks(text) == text
+
+
+def test_parse_mcp_server_alias_fence(monkeypatch):
+    class DummyMcp:
+        def get_all_tools(self, _disabled):
+            return [
+                {
+                    "server_id": "0ac61a6b",
+                    "server_name": "Atlassian",
+                    "name": "search",
+                    "qualified_name": "mcp__0ac61a6b__search",
+                }
+            ]
+
+        def coerce_tool_arguments(self, _qualified, args, **_kwargs):
+            return args
+
+    src.agent_tools.set_mcp_manager(DummyMcp())
+    try:
+        text = '```atlassian\n{"query":"Circit AI"}\n``````bash\npwd\n```'
+
+        blocks = parse_tool_blocks(text)
+
+        assert [b.tool_type for b in blocks] == ["mcp__0ac61a6b__search", "bash"]
+        assert json.loads(blocks[0].content) == {"query": "Circit AI"}
+        assert strip_tool_blocks(text) == ""
+    finally:
+        src.agent_tools.set_mcp_manager(None)
+
+
+def test_parse_mcp_server_tool_alias_fence(monkeypatch):
+    class DummyMcp:
+        def get_all_tools(self, _disabled):
+            return [
+                {
+                    "server_id": "0ac61a6b",
+                    "server_name": "Atlassian",
+                    "name": "search",
+                    "qualified_name": "mcp__0ac61a6b__search",
+                }
+            ]
+
+        def coerce_tool_arguments(self, _qualified, args, **_kwargs):
+            return args
+
+    src.agent_tools.set_mcp_manager(DummyMcp())
+    try:
+        text = '```mcp_atlassian_search\n{"query":"Circit AI"}\n``````bash\npwd\n```'
+
+        blocks = parse_tool_blocks(text)
+
+        assert [b.tool_type for b in blocks] == ["mcp__0ac61a6b__search", "bash"]
+        assert json.loads(blocks[0].content) == {"query": "Circit AI"}
+        assert strip_tool_blocks(text) == ""
+    finally:
+        src.agent_tools.set_mcp_manager(None)
+
+
+def test_raw_mcp_function_call_preserves_order_with_fenced_tools():
+    text = 'mcp__0ac61a6b__search{"query":"Circit AI"}```bash\npwd\n```'
+
+    blocks = parse_tool_blocks(text)
+
+    assert [b.tool_type for b in blocks] == ["mcp__0ac61a6b__search", "bash"]
+    assert json.loads(blocks[0].content) == {"query": "Circit AI"}
+    assert blocks[1].content == "pwd"
+    assert strip_tool_blocks(text) == ""
+
+
 @pytest.mark.asyncio
 async def test_empty_bash_tool_returns_error_instead_of_success(monkeypatch):
     monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda _owner: True)

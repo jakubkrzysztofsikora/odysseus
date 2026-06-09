@@ -414,6 +414,8 @@ For hosted MCP servers, use the `HTTP` transport in Settings. This maps to the M
 
 The OAuth callback endpoint is `/api/mcp/oauth/callback`. If the provider redirects to a localhost URL that your browser cannot complete, copy the full callback URL from the browser address bar and paste it into the Odysseus authorization page.
 
+For chat-style models that do not receive native MCP schemas, Odysseus waits briefly for requested MCP servers to finish connecting before it builds the agent prompt. Those models are prompted to emit MCP calls as raw lines like `mcp__server_id__tool_name{"required_arg":"real value"}`; empty `{}` calls and blank required arguments are rejected instead of being forwarded.
+
 ### Group agent workflows
 
 Group chat runs each participant in agent mode so MCP, web, shell, and file tools are available subject to the same server-side privilege gates and disabled-tool settings as normal agent chat. If a workspace is selected with `/workspace` or the workspace picker, that folder is sent with each group-agent turn so repo reads, searches, and shell commands run from the intended project.
