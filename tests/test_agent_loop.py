@@ -22,6 +22,13 @@ from src.agent_loop import (
     _append_tool_results,
     _allow_native_tool_schemas_for_non_api_model,
     _include_mcp_schema_names,
+    _tool_retrieval_query_for_messages,
+    _force_all_mcp_tools_for_query,
+    _latest_turn_requires_tool_call,
+    _latest_turn_forbids_tool_calls,
+    _filter_disallowed_mcp_tool_blocks,
+    _filter_unrequested_bash_tool_blocks,
+    _dedupe_tool_blocks,
     _mcp_prompt_requested,
     _mcp_prompt_cache_signature,
     _mcp_target_hints,
@@ -245,6 +252,118 @@ class TestMcpToolVisibility:
             "Sequential group handoff. Previous participant output: build the plan",
             force_all_mcp_tools=True,
         ) is True
+
+    def test_concrete_followup_tool_retrieval_uses_latest_turn_only(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Use the Atlassian MCP search tool with exact query: "
+                    "Odysseus smoke sentinel 2026-06-10."
+                ),
+            },
+            {"role": "assistant", "content": '{"mcp_called":true}'},
+            {
+                "role": "user",
+                "content": (
+                    "This is turn 2 in the same session. Use the prior assistant JSON. "
+                    "You must call Bash again with exactly: printf 'ODY_BASH_2'."
+                ),
+            },
+        ]
+
+        query = _tool_retrieval_query_for_messages(messages)
+
+        assert "printf 'ODY_BASH_2'" in query
+        assert "Atlassian MCP" not in query
+        assert _force_all_mcp_tools_for_query(query, True) is False
+
+    def test_vague_followup_tool_retrieval_keeps_recent_context(self):
+        messages = [
+            {"role": "user", "content": "Use Atlassian MCP to search Jira for Circit AI context."},
+            {"role": "assistant", "content": "ready"},
+            {"role": "user", "content": "continue"},
+        ]
+
+        query = _tool_retrieval_query_for_messages(messages)
+
+        assert "continue" in query
+        assert "Atlassian MCP" in query
+
+    def test_group_handoff_can_still_force_mcp_tools(self):
+        query = (
+            "Sequential group handoff.\n\n"
+            "Previous participant output: Found the context.\n\n"
+            "Original user task for context only:\n"
+            "Use Atlassian MCP to fetch Circit business context."
+        )
+
+        assert _force_all_mcp_tools_for_query(query, True) is True
+
+    def test_latest_turn_required_tool_detection(self):
+        assert _latest_turn_requires_tool_call(
+            "You must call Bash again with exactly: printf 'ODY_BASH_2'."
+        ) is True
+        assert _latest_turn_requires_tool_call(
+            "Use the Atlassian MCP search tool with exact query: Circit AI."
+        ) is True
+        assert _latest_turn_requires_tool_call("Do not call tools. Answer from memory.") is False
+
+    def test_latest_turn_no_tools_detection(self):
+        assert _latest_turn_forbids_tool_calls(
+            "Do not call tools. Answer only from the previous JSON."
+        ) is True
+        assert _latest_turn_forbids_tool_calls("Answer without tools from context.") is True
+        assert _latest_turn_forbids_tool_calls("Use Bash to run exactly: pwd.") is False
+
+    def test_disallowed_mcp_blocks_are_filtered_before_dispatch(self):
+        blocks = [
+            ToolBlock("bash", "printf 'ODY_BASH_2'"),
+            ToolBlock("mcp__0ac61a6b__search", '{"query":"stale"}'),
+        ]
+
+        kept, removed = _filter_disallowed_mcp_tool_blocks(blocks, allow_mcp=False)
+
+        assert [block.tool_type for block in kept] == ["bash"]
+        assert [block.tool_type for block in removed] == ["mcp__0ac61a6b__search"]
+
+    def test_unrequested_bash_blocks_are_filtered_when_exact_command_exists(self):
+        blocks = [
+            ToolBlock("bash", "printf 'ODY_BASH_1'"),
+            ToolBlock("bash", "printf 'ODY_BASH_2'"),
+            ToolBlock("mcp__0ac61a6b__search", '{"query":"current"}'),
+        ]
+
+        kept, removed = _filter_unrequested_bash_tool_blocks(
+            blocks,
+            "printf 'ODY_BASH_1'",
+        )
+
+        assert [(block.tool_type, block.content) for block in kept] == [
+            ("bash", "printf 'ODY_BASH_1'"),
+            ("mcp__0ac61a6b__search", '{"query":"current"}'),
+        ]
+        assert [block.content for block in removed] == ["printf 'ODY_BASH_2'"]
+
+    def test_allowed_mcp_blocks_are_kept_for_mcp_turns(self):
+        blocks = [ToolBlock("mcp__0ac61a6b__search", '{"query":"current"}')]
+
+        kept, removed = _filter_disallowed_mcp_tool_blocks(blocks, allow_mcp=True)
+
+        assert kept == blocks
+        assert removed == []
+
+    def test_duplicate_tool_blocks_are_dropped_within_round(self):
+        blocks = [
+            ToolBlock("bash", "printf 'ODY_BASH_1'"),
+            ToolBlock("bash", "printf 'ODY_BASH_1'"),
+            ToolBlock("mcp__0ac61a6b__search", '{"query":"current"}'),
+        ]
+
+        kept, removed = _dedupe_tool_blocks(blocks)
+
+        assert [block.tool_type for block in kept] == ["bash", "mcp__0ac61a6b__search"]
+        assert [block.tool_type for block in removed] == ["bash"]
 
     def test_mcp_prompt_wait_detects_targeted_mcp_requests(self):
         assert _mcp_prompt_requested("Use Atlassian MCP to search Jira", False) is True
@@ -534,6 +653,29 @@ class TestMcpSearchArgumentRepair:
         assert repaired_sigs == [
             "mcp__0ac61a6b__search:{\"query\": \"Use Atlassian MCP to search Circit AI usage patterns\"}"
         ]
+
+    def test_mcp_search_exact_query_repair_removes_neighbor_instruction_text(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Use the Atlassian MCP search tool with the exact query: "
+                    "Odysseus smoke sentinel 2026-06-10. Do not use empty tool arguments."
+                ),
+            }
+        ]
+        blocks = [
+            ToolBlock(
+                "mcp__0ac61a6b__search",
+                json.dumps({"query": "Odysseus smoke sentinel 2026-06-10. Do not use empty tool arguments"}),
+            )
+        ]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, None, messages)
+
+        assert json.loads(repaired[0].content) == {
+            "query": "Odysseus smoke sentinel 2026-06-10"
+        }
 
     def test_repaired_native_args_sync_skips_failed_native_conversions(self):
         messages = [

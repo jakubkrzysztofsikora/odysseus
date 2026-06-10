@@ -22,10 +22,13 @@ The regression target is a `chatgpt/*` model using native MCP function schemas, 
 - see owner-scoped MCP tools when authenticated as an admin user, or with an Odysseus API token whose owner is an admin;
 - call an MCP search tool with a non-empty query;
 - call Bash with non-empty arguments;
+- execute each exact smoke tool once, not zero times and not duplicate times;
+- reject extra Bash calls that do not match the current exact command;
 - prove Bash succeeded by checking the `tool_output` exit code is `0` and the
   expected marker appears in the actual tool output, not only in final prose;
 - repeat a Bash tool call on a second turn and remember the first turn's assistant JSON;
 - answer a strict third follow-up from session history without calling tools;
+- avoid executing or visibly streaming stale MCP calls on a later Bash-only follow-up;
 - continue to a final answer after tool outputs;
 - pass even when the session stores an OpenAI-compatible base URL such as `/v1`;
   dispatch must normalize it to `/v1/chat/completions`.
@@ -48,8 +51,8 @@ Streaming reads are capped by `ODYSSEUS_STREAM_READ_TIMEOUT_CAP_SECONDS`
 fast and can route through the normal pre-content fallback path instead of
 leaving the agent turn open for the full UI stream timeout.
 
-The native path repairs empty MCP search arguments before dispatch. If GPT emits an empty native Bash call but the latest user instruction explicitly contains the Bash command, that command is repaired before execution. Repaired native tool arguments are echoed back into the assistant `tool_calls` history so the next round sees the executed arguments, not `{}`. If GPT repeats the same repaired empty MCP/search call, Odysseus suppresses that repeat; if an exact Bash command is still pending it nudges Bash next, otherwise it forces a tool-free final artifact.
+The native path repairs empty MCP search arguments before dispatch. If the user supplied an explicit "exact query", Odysseus also corrects MCP search calls that include extra neighboring instruction text. If GPT emits an empty native Bash call but the latest user instruction explicitly contains the Bash command, that command is repaired before execution. Repaired native tool arguments are echoed back into the assistant `tool_calls` history so the next round sees the executed arguments, not `{}`. If a model repeats the same exact tool call in one round, Odysseus drops the duplicate before dispatch. If an exact Bash command is in scope, Odysseus blocks non-matching Bash calls from the same turn. If an exact Bash command is still pending after other tools ran, Odysseus narrows the next retry to Bash instead of accepting a claimed result. If the latest turn forbids tools, Odysseus sends no native schemas and discards any attempted tool call before execution.
 
-The text-tool parser accepts both raw MCP call forms: `mcp__server__tool{"query":"..."}` and `mcp__server__tool({"query":"..."})`. Empty parenthesized search calls are parsed, stripped from visible output, and repaired from recent real user or group-agent instructions before dispatch. Sequential group mode must also pass a structured handoff: participant 1 receives the original task, participant 2+ receive the previous participant artifact as the primary input, plus bounded original-task context and bounded tool trace.
+The text-tool parser accepts both raw MCP call forms: `mcp__server__tool{"query":"..."}` and `mcp__server__tool({"query":"..."})`. Empty parenthesized search calls are parsed, stripped from visible output, and repaired from recent real user or group-agent instructions before dispatch. Concrete latest-turn tool scope wins over stale history, so a previous Atlassian/MCP request does not cause MCP execution on a later Bash-only follow-up. Sequential group mode must also pass a structured handoff: participant 1 receives the original task, participant 2+ receive the previous participant artifact as the primary input, plus bounded original-task context and bounded tool trace.
 
 Non-admin users intentionally cannot execute Bash or arbitrary `mcp__*` tools. If using a temporary DB-created API token for local smoke, set its `owner` to an admin user, delete it after the run, and do not print the raw token.

@@ -193,6 +193,16 @@ def _has_tool(events: list[dict[str, Any]], tool: str, *, command: str | None = 
     return start_ok and output_ok
 
 
+def _tool_start_count(events: list[dict[str, Any]], tool: str, *, command: str | None = None) -> int:
+    return sum(
+        1
+        for event in events
+        if event.get("type") == "tool_start"
+        and event.get("tool") == tool
+        and (command is None or event.get("command") == command)
+    )
+
+
 def _mcp_query_called(events: list[dict[str, Any]], tool: str, query: str) -> bool:
     for event in events:
         if event.get("type") != "tool_start" or event.get("tool") != tool:
@@ -211,6 +221,14 @@ def _mcp_output_ok(events: list[dict[str, Any]], tool: str) -> bool:
         event.get("type") == "tool_output"
         and event.get("tool") == tool
         and event.get("exit_code") == 0
+        for event in events
+    )
+
+
+def _mcp_started(events: list[dict[str, Any]]) -> bool:
+    return any(
+        event.get("type") == "tool_start"
+        and str(event.get("tool") or "").startswith("mcp__")
         for event in events
     )
 
@@ -291,8 +309,13 @@ def main() -> int:
         strict_events = results[2][1]
         checks = {
             "turn1_bash_exact": _has_tool(turn1_events, "bash", command="printf 'ODY_BASH_1'", output="ODY_BASH_1"),
+            "turn1_bash_once": _tool_start_count(turn1_events, "bash", command="printf 'ODY_BASH_1'") == 1,
+            "turn1_bash_only_expected": _tool_start_count(turn1_events, "bash") == 1,
             "turn2_bash_exact": _has_tool(turn2_events, "bash", command="printf 'ODY_BASH_2'", output="ODY_BASH_2"),
+            "turn2_bash_once": _tool_start_count(turn2_events, "bash", command="printf 'ODY_BASH_2'") == 1,
+            "turn2_bash_only_expected": _tool_start_count(turn2_events, "bash") == 1,
             "turn1_mcp_exact_query": _mcp_query_called(turn1_events, args.mcp_tool, args.mcp_query),
+            "turn1_mcp_once": _tool_start_count(turn1_events, args.mcp_tool) == 1,
             "turn1_mcp_output": _mcp_output_ok(turn1_events, args.mcp_tool),
             "no_errors": not any(
                 event.get("type") in {"error", "bad_json"} or "Stream error" in json.dumps(event)
@@ -300,6 +323,11 @@ def main() -> int:
                 for event in events
             ),
             "turn2_remembers_turn1": "ODY_BASH_1" in answers["turn2"],
+            "turn2_no_mcp": not _mcp_started(turn2_events),
+            "turn2_no_mcp_text": not any(
+                marker in answers["turn2"].lower()
+                for marker in ("```atlassian", "mcp__", "mcp_called", "mcp_searched")
+            ),
             "strict_remembers_turn1": "ODY_BASH_1" in answers["strict_followup"],
             "strict_no_tools": not any(event.get("type") == "tool_start" for event in strict_events),
         }

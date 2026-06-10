@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -37,6 +38,7 @@ from smoke_multiturn_multitool import (
     _request,
     _stream_turn,
     _summarize,
+    _tool_start_count,
 )
 
 
@@ -122,11 +124,15 @@ def _event_has_error(events: list[dict[str, Any]]) -> bool:
 
 
 def _json_answer(answer: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads((answer or "").strip())
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    parsed_objects = []
+    for match in re.finditer(r"\{[^{}]*\}", answer or ""):
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            parsed_objects.append(parsed)
+    return parsed_objects[-1] if parsed_objects else {}
 
 
 def main() -> int:
@@ -240,10 +246,15 @@ def main() -> int:
         second_json = _json_answer(second_answer)
         checks = {
             "first_bash_exact": _has_tool(first_events, "bash", command="printf 'ODY_GROUP_1'", output="ODY_GROUP_1"),
+            "first_bash_once": _tool_start_count(first_events, "bash", command="printf 'ODY_GROUP_1'") == 1,
+            "first_bash_only_expected": _tool_start_count(first_events, "bash") == 1,
             "first_mcp_exact_query": _mcp_query_called(first_events, args.mcp_tool, args.mcp_query),
+            "first_mcp_once": _tool_start_count(first_events, args.mcp_tool) == 1,
             "first_mcp_output": _mcp_output_ok(first_events, args.mcp_tool),
             "handoff_contains_previous_artifact": "Sequential group handoff." in handoff and "ODY_GROUP_1" in handoff,
             "second_bash_exact": _has_tool(second_events, "bash", command="printf 'ODY_GROUP_2'", output="ODY_GROUP_2"),
+            "second_bash_once": _tool_start_count(second_events, "bash", command="printf 'ODY_GROUP_2'") == 1,
+            "second_bash_only_expected": _tool_start_count(second_events, "bash") == 1,
             "second_remembers_first": "ODY_GROUP_1" in second_answer,
             "second_final_seen": second_json.get("bash_seen") == "ODY_GROUP_2",
             "first_json_marker": first_json.get("bash_seen") == "ODY_GROUP_1" and first_json.get("mcp_called") is True,
