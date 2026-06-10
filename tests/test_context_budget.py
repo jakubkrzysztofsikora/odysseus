@@ -46,6 +46,16 @@ def test_is_setting_overridden_reads_raw_saved_file(tmp_path, monkeypatch):
     assert settings.is_setting_overridden("agent_input_token_budget") is False
 
 
+def test_is_setting_overridden_ignores_persisted_default_values(tmp_path, monkeypatch):
+    import src.settings as settings
+
+    f = tmp_path / "settings.json"
+    f.write_text(json.dumps({"agent_input_token_budget": 6000}), encoding="utf-8")
+    monkeypatch.setattr(settings, "SETTINGS_FILE", str(f))
+
+    assert settings.is_setting_overridden("agent_input_token_budget") is False
+
+
 # ---------------------------------------------------------------------------
 # Configurable hard_max — completes the reviewer requirement from #1190 that
 # was carried over but not implemented in #1230: the ceiling on the auto-

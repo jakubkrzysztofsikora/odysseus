@@ -1467,6 +1467,33 @@ def _latest_user_text_for_tool_repair(messages: List[Dict], max_chars: int = 100
     return text[:max_chars]
 
 
+def _extract_explicit_search_query(text: str) -> str:
+    """Extract an explicitly requested MCP/search query from user text."""
+    source = re.sub(r"\s+", " ", text or "").strip()
+    if not source:
+        return ""
+    patterns = (
+        r"\bexact\s+query\s+`([^`]+)`",
+        r"\bexact\s+query\s+['\"]([^'\"]+)['\"]",
+        r"\bexact\s+query\s*:\s*(.+?)(?=(?:\.\s+[A-Z])|$)",
+        r"\bquery\s+exactly\s+`([^`]+)`",
+        r"\bquery\s+exactly\s+['\"]([^'\"]+)['\"]",
+        r"\bquery\s+exactly\s*:\s*(.+?)(?=(?:\.\s+[A-Z])|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, source, flags=re.IGNORECASE)
+        if not match:
+            continue
+        query = match.group(1).strip()
+        if query.endswith("."):
+            query = query[:-1].rstrip()
+        if len(query) >= 2 and query[0] == query[-1] and query[0] in {"'", '"', "`"}:
+            query = query[1:-1].strip()
+        if query and len(query) <= 1000:
+            return query
+    return ""
+
+
 def _latest_user_message_for_arg_repair(messages: List[Dict], max_chars: int = 50000) -> str:
     """Return the latest real user/workflow message for explicit arg extraction."""
     for msg in reversed(messages):
@@ -1562,7 +1589,8 @@ def _repair_empty_mcp_search_tool_blocks(
             continue
 
         if not repair_query:
-            repair_query = _latest_user_text_for_tool_repair(messages)
+            repair_text = _latest_user_text_for_tool_repair(messages)
+            repair_query = _extract_explicit_search_query(repair_text) or repair_text
         if not repair_query:
             repaired.append(block)
             continue
@@ -1584,13 +1612,21 @@ def _extract_explicit_bash_command(text: str) -> str:
     source = re.sub(r"\s+", " ", text or "").strip()
     if not source:
         return ""
+    sentence_boundary = r"(?=(?:\.\s+(?:[A-Z]|\d+[\).]))|$)"
     patterns = (
+        r"(?:bash|shell)[^.]{0,180}?\brun\s+exactly\s+`([^`]+)`",
+        r"(?:bash|shell)[^.]{0,180}?\brun\s+exactly\s+['\"]([^'\"]+)['\"]",
+        r"(?:bash|shell)[^.]{0,180}?\brun\s+exactly\s*:\s*(.+?)" + sentence_boundary,
+        r"(?:bash|shell)[^.]{0,180}?\brun\s*:\s*(.+?)" + sentence_boundary,
+        r"(?:bash|shell)[^.]{0,180}?\bwith\s+exactly\s+`([^`]+)`",
+        r"(?:bash|shell)[^.]{0,180}?\bwith\s+exactly\s+['\"]([^'\"]+)['\"]",
+        r"(?:bash|shell)[^.]{0,180}?\bwith\s+exactly\s*:\s*(.+?)" + sentence_boundary,
         r"(?:bash|shell)[^.]{0,180}?\bcommand\s+exactly\s+`([^`]+)`",
         r"(?:bash|shell)[^.]{0,180}?\bcommand\s+`([^`]+)`",
         r"(?:bash|shell)[^.]{0,180}?\bcommand\s+exactly\s+['\"]([^'\"]+)['\"]",
         r"(?:bash|shell)[^.]{0,180}?\bcommand\s+['\"]([^'\"]+)['\"]",
-        r"(?:bash|shell)[^.]{0,180}?\bcommand exactly\s*:\s*(.+?)(?=(?:\.\s+[A-Z])|$)",
-        r"(?:bash|shell)[^.]{0,180}?\bcommand\s*:\s*(.+?)(?=(?:\.\s+[A-Z])|$)",
+        r"(?:bash|shell)[^.]{0,180}?\bcommand exactly\s*:\s*(.+?)" + sentence_boundary,
+        r"(?:bash|shell)[^.]{0,180}?\bcommand\s*:\s*(.+?)" + sentence_boundary,
     )
     for pattern in patterns:
         match = re.search(pattern, source, flags=re.IGNORECASE)
@@ -1609,6 +1645,7 @@ def _extract_explicit_bash_command(text: str) -> str:
             r"\s+(?=Summarize\b)",
             r"\s+(?=Continue\b)",
             r"\s+(?=Original\s+user\s+task\b)",
+            r"\.\s+(?=\d+[\).])",
         )
         stops = [
             m.start()

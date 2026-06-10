@@ -212,17 +212,23 @@ def get_setting(key: str, default: Any = None) -> Any:
 
 
 def is_setting_overridden(key: str) -> bool:
-    """True if ``key`` is explicitly present in the saved settings file.
+    """True if ``key`` is explicitly changed in the saved settings file.
 
     ``load_settings`` merges DEFAULT_SETTINGS with the saved file, so a value
-    equal to its default is indistinguishable from "never set" via get_setting.
-    Callers that need to treat an explicit user choice differently from the
-    default (e.g. adaptive budgets) use this to read the raw saved file.
+    equal to its default is indistinguishable from "never set" via
+    ``get_setting``. The app may also persist a full merged settings blob, so
+    key presence alone is not enough to mean the user intentionally overrode a
+    default. Callers that need adaptive default behavior use this raw-file check
+    to distinguish a real non-default value from persisted defaults.
     """
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             saved = json.load(f)
-        return isinstance(saved, dict) and key in saved
+        if not isinstance(saved, dict) or key not in saved:
+            return False
+        if key in DEFAULT_SETTINGS and saved.get(key) == DEFAULT_SETTINGS[key]:
+            return False
+        return True
     except (FileNotFoundError, json.JSONDecodeError):
         return False
 

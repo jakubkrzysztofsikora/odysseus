@@ -436,6 +436,24 @@ class TestMcpSearchArgumentRepair:
             "query": "Find Circit Copilot usage patterns"
         }
 
+    def test_empty_mcp_search_args_prefer_explicit_exact_query(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Also call the Atlassian MCP search tool with the exact query: "
+                    "Odysseus smoke sentinel 2026-06-10. Do not use empty tool arguments."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("mcp__atlassian__search", "{}")]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, self.DummyMcp(), messages)
+
+        assert json.loads(repaired[0].content) == {
+            "query": "Odysseus smoke sentinel 2026-06-10"
+        }
+
     def test_empty_mcp_search_args_are_repaired_without_live_schema(self):
         messages = [{"role": "user", "content": "Search Atlassian for Circit support AI usage"}]
         blocks = [ToolBlock("mcp__0ac61a6b__search", "{}")]
@@ -665,6 +683,54 @@ class TestLocalToolArgumentRepair:
         repaired = _repair_empty_local_tool_blocks(blocks, messages)
 
         assert repaired[0].content == "printf SMOKE_ODYSSEUS_MCP_BASH_OK"
+
+    def test_empty_bash_repair_finds_run_exactly_colon_command(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Use Bash to run exactly: printf 'ODY_BASH_1'. "
+                    "Also call the Atlassian MCP search tool with an exact query."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == "printf 'ODY_BASH_1'"
+
+    def test_empty_bash_repair_stops_before_next_numbered_instruction(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "1. Use Bash to run exactly: printf 'ODY_BASH_1'. "
+                    "2. Use the Atlassian MCP search tool with the exact query."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == "printf 'ODY_BASH_1'"
+
+    def test_empty_bash_repair_finds_with_exactly_colon_command(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Use the prior turn result. You must call Bash again with exactly: "
+                    "printf 'ODY_BASH_2'. Then answer in compact JSON."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == "printf 'ODY_BASH_2'"
 
     def test_empty_bash_repair_finds_command_late_in_group_handoff(self):
         messages = [

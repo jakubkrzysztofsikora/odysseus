@@ -2,6 +2,14 @@
 
 Use this smoke after changes to agent prompting, API-token auth, native tool schemas, MCP routing, or text-tool parsing.
 
+Run the live smoke from the repo root:
+
+```bash
+python3 scripts/smoke_multiturn_multitool.py
+```
+
+Defaults target the local app at `http://127.0.0.1:7860`, user `admin`, password file `deploy/.admin-pw`, endpoint `00b16177`, model `chatgpt/gpt-5.5`, and Atlassian search tool `mcp__0ac61a6b__search`. Override with `ODYSSEUS_BASE_URL`, `ODYSSEUS_SMOKE_MODEL`, `ODYSSEUS_SMOKE_ENDPOINT_ID`, or `ODYSSEUS_SMOKE_MCP_TOOL`.
+
 The regression target is a `chatgpt/*` model using native MCP function schemas, with raw text-tool parsing still covered as fallback. The agent must:
 
 - create a real agent session through `/api/session`;
@@ -10,6 +18,8 @@ The regression target is a `chatgpt/*` model using native MCP function schemas, 
 - call Bash with non-empty arguments;
 - prove Bash succeeded by checking the `tool_output` exit code is `0` and the
   expected marker appears in the actual tool output, not only in final prose;
+- repeat a Bash tool call on a second turn and remember the first turn's assistant JSON;
+- answer a strict third follow-up from session history without calling tools;
 - continue to a final answer after tool outputs;
 - pass even when the session stores an OpenAI-compatible base URL such as `/v1`;
   dispatch must normalize it to `/v1/chat/completions`.
