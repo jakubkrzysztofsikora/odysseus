@@ -478,6 +478,30 @@ class TestMcpSearchArgumentRepair:
             "query": "Use Atlassian MCP to search Circit AI usage patterns"
         }
 
+    def test_empty_mcp_search_repair_uses_original_task_in_group_handoff(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Sequential group handoff.\n\n"
+                    "Previous participant output:\n"
+                    + ("long prior artifact line\n" * 500)
+                    + "\nOriginal user task for context only:\n"
+                    "Use Atlassian MCP to fetch Circit existing AI internal "
+                    "infrastructure and business context.\n\n"
+                    "Continue with your assigned role. If you need tools or MCP, "
+                    "call them with explicit non-empty arguments."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("mcp__0ac61a6b__search", "{}")]
+
+        repaired = _repair_empty_mcp_search_tool_blocks(blocks, None, messages)
+        query = json.loads(repaired[0].content)["query"]
+
+        assert query.startswith("Use Atlassian MCP to fetch Circit existing AI")
+        assert "long prior artifact line" not in query
+
     def test_repaired_native_mcp_args_are_echoed_to_next_round(self):
         messages = [{"role": "user", "content": "Use Atlassian MCP to search Circit AI usage patterns"}]
         native = [{"id": "call_1", "name": "mcp__0ac61a6b__search", "arguments": "{}"}]
@@ -492,6 +516,28 @@ class TestMcpSearchArgumentRepair:
         assert repaired_sigs == [
             "mcp__0ac61a6b__search:{\"query\": \"Use Atlassian MCP to search Circit AI usage patterns\"}"
         ]
+
+    def test_repaired_native_args_sync_skips_failed_native_conversions(self):
+        messages = [
+            {
+                "role": "user",
+                "content": "Run bash with command exactly: printf 'SMOKE native-bash-ok'.",
+            }
+        ]
+        native = [
+            {"id": "bad_1", "name": "not_a_tool", "arguments": "{}"},
+            {"id": "call_1", "name": "bash", "arguments": "{}"},
+        ]
+        blocks, used_native = _resolve_tool_blocks("", native, 1)
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        repaired_sigs = _sync_repaired_native_tool_call_arguments(native, repaired, used_native)
+
+        assert native[0]["arguments"] == "{}"
+        assert json.loads(native[1]["arguments"]) == {
+            "command": "printf 'SMOKE native-bash-ok'"
+        }
+        assert repaired_sigs == ["bash:printf 'SMOKE native-bash-ok'"]
 
     def test_non_search_mcp_tool_is_not_repaired_without_live_schema(self):
         messages = [{"role": "user", "content": "Create a Jira issue for the launch plan"}]

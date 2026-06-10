@@ -1450,9 +1450,19 @@ _MCP_SEARCH_ARGUMENT_NAMES = frozenset({
 })
 
 
-def _latest_user_text_for_tool_repair(messages: List[Dict], max_chars: int = 320) -> str:
+def _latest_user_text_for_tool_repair(messages: List[Dict], max_chars: int = 1000) -> str:
     """Return the latest real user/workflow instruction, not tool-result echo."""
-    text = _recent_context_for_retrieval(messages, max_user=3, max_chars=max_chars)
+    text = _latest_user_message_for_arg_repair(messages)
+    if text:
+        marker = re.search(
+            r"\bOriginal user task for context only:\s*",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if marker:
+            text = text[marker.end():]
+    else:
+        text = _recent_context_for_retrieval(messages, max_user=3, max_chars=max_chars)
     text = re.sub(r"\s+", " ", text or "").strip()
     return text[:max_chars]
 
@@ -1656,7 +1666,22 @@ def _sync_repaired_native_tool_call_arguments(
         return []
 
     repaired_sigs = []
-    for tc, block in zip(native_tool_calls, tool_blocks):
+    native_index = 0
+    for block in tool_blocks:
+        tc = None
+        while native_index < len(native_tool_calls):
+            candidate = native_tool_calls[native_index]
+            native_index += 1
+            original = function_call_to_tool_block(
+                candidate.get("name", ""),
+                candidate.get("arguments", "{}"),
+            )
+            if original and getattr(original, "tool_type", "") == getattr(block, "tool_type", ""):
+                tc = candidate
+                break
+        if tc is None:
+            continue
+
         tool_type = getattr(block, "tool_type", "")
         content = getattr(block, "content", "")
         fixed_args = None
