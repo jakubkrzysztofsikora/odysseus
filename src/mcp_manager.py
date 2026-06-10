@@ -98,7 +98,7 @@ def _sanitize_schema_token(value: Any, limit: int = _MCP_TOKEN_MAX) -> str:
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value))
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
-        text = text[:limit].rstrip() + "..."
+        text = text[:limit].rstrip() + "\u2026"
     return text
 
 
@@ -122,10 +122,10 @@ def _format_mcp_params(input_schema: Any) -> str:
         parts.append(tag)
     extra = len(props) - len(parts)
     if extra > 0:
-        parts.append(f"...+{extra} more")
+        parts.append(f"\u2026+{extra} more")
     hint = " Args (JSON): {" + ", ".join(parts) + "}"
     if len(hint) > _MCP_HINT_MAX:
-        hint = hint[:_MCP_HINT_MAX - 3].rstrip() + "..."
+        hint = hint[:_MCP_HINT_MAX - 1].rstrip() + "\u2026"
     return hint
 
 
