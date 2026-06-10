@@ -8,7 +8,13 @@ Run the live smoke from the repo root:
 python3 scripts/smoke_multiturn_multitool.py
 ```
 
-Defaults target the local app at `http://127.0.0.1:7860`, user `admin`, password file `deploy/.admin-pw`, endpoint `00b16177`, model `chatgpt/gpt-5.5`, and Atlassian search tool `mcp__0ac61a6b__search`. Override with `ODYSSEUS_BASE_URL`, `ODYSSEUS_SMOKE_MODEL`, `ODYSSEUS_SMOKE_ENDPOINT_ID`, or `ODYSSEUS_SMOKE_MCP_TOOL`.
+Run the sequential group-agent smoke from the repo root:
+
+```bash
+python3 scripts/smoke_group_sequential.py
+```
+
+Defaults target the local app at `http://127.0.0.1:7860`, user `admin`, password file `deploy/.admin-pw`, endpoint `00b16177`, model `chatgpt/gpt-5.5`, and Atlassian search tool `mcp__0ac61a6b__search`. Override with `ODYSSEUS_BASE_URL`, `ODYSSEUS_SMOKE_MODEL`, `ODYSSEUS_GROUP_SMOKE_MODELS`, `ODYSSEUS_SMOKE_ENDPOINT_ID`, or `ODYSSEUS_SMOKE_MCP_TOOL`.
 
 The regression target is a `chatgpt/*` model using native MCP function schemas, with raw text-tool parsing still covered as fallback. The agent must:
 
@@ -23,7 +29,8 @@ The regression target is a `chatgpt/*` model using native MCP function schemas, 
 - continue to a final answer after tool outputs;
 - pass even when the session stores an OpenAI-compatible base URL such as `/v1`;
   dispatch must normalize it to `/v1/chat/completions`.
-- in sequential group mode, pass participant 1's final artifact as participant 2's primary input, not the original user prompt again.
+- in sequential group mode, pass participant 1's final artifact and tool trace as participant 2's primary input, not the original user prompt again.
+- in sequential group mode, prove participant 2 can use a second tool call and include participant 1's marker in its final artifact.
 
 Expected live evidence:
 

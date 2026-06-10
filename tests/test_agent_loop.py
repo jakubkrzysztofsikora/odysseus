@@ -700,6 +700,22 @@ class TestLocalToolArgumentRepair:
 
         assert repaired[0].content == "printf 'ODY_BASH_1'"
 
+    def test_empty_bash_repair_stops_before_semicolon_followup_instruction(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Agent One must use Bash to run exactly: printf 'ODY_GROUP_1'; "
+                    "then use the Atlassian MCP search tool with the exact query."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == "printf 'ODY_GROUP_1'"
+
     def test_empty_bash_repair_stops_before_next_numbered_instruction(self):
         messages = [
             {
@@ -757,6 +773,54 @@ class TestLocalToolArgumentRepair:
             'git rev-parse --show-toplevel && rg -n "multiagent|mcp" '
             "static/js/group.js src/agent_loop.py | head -20"
         )
+
+    def test_empty_bash_repair_prefers_previous_artifact_instruction_in_group_handoff(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Sequential group handoff.\n\n"
+                    "Primary input: continue from the previous participant output below.\n\n"
+                    "Previous participant (Agent One) output:\n"
+                    "{\"agent\":\"Agent One\",\"bash_seen\":\"ODY_GROUP_1\","
+                    "\"next_agent_instruction\":\"Continue from this artifact; "
+                    "use Bash to run exactly printf 'ODY_GROUP_2', then answer compact JSON.\"}\n\n"
+                    "Tool trace:\nTOOL bash: printf 'ODY_GROUP_1'\nOUTPUT bash: ODY_GROUP_1\n\n"
+                    "Original user task for context only:\n"
+                    "Agent One must use Bash to run exactly: printf 'ODY_GROUP_1'. "
+                    "Agent Two must use Bash to run exactly: printf 'ODY_GROUP_2'."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == "printf 'ODY_GROUP_2'"
+
+    def test_empty_bash_repair_stops_before_report_instruction_in_group_handoff(self):
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Sequential group handoff.\n\n"
+                    "Primary input: continue from the previous participant output below.\n\n"
+                    "Previous participant (Agent One) output:\n"
+                    "{\"agent\":\"Agent One\",\"bash_seen\":\"ODY_GROUP_1\","
+                    "\"next_agent_instruction\":\"Agent Two continue from this artifact; "
+                    "run exactly printf 'ODY_GROUP_2' and report handoff_used true\"}\n\n"
+                    "Tool trace:\nTOOL bash: printf 'ODY_GROUP_1'\nOUTPUT bash: ODY_GROUP_1\n\n"
+                    "Original user task for context only:\n"
+                    "Agent One must use Bash to run exactly: printf 'ODY_GROUP_1'. "
+                    "Agent Two must use Bash to run exactly: printf 'ODY_GROUP_2'."
+                ),
+            }
+        ]
+        blocks = [ToolBlock("bash", "")]
+
+        repaired = _repair_empty_local_tool_blocks(blocks, messages)
+
+        assert repaired[0].content == "printf 'ODY_GROUP_2'"
 
     def test_empty_bash_args_are_not_repaired_without_explicit_command(self):
         messages = [{"role": "user", "content": "Use bash if needed to inspect the repo"}]

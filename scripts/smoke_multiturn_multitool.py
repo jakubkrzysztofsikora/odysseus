@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
@@ -101,15 +102,26 @@ def _create_session(
     return session_id
 
 
-def _stream_turn(base_url: str, cookie: str, session_id: str, message: str, timeout: int) -> tuple[list[dict[str, Any]], str, float]:
+def _stream_turn(
+    base_url: str,
+    cookie: str,
+    session_id: str,
+    message: str,
+    timeout: int,
+    *,
+    allow_web_search: bool = False,
+    workspace: str | None = None,
+) -> tuple[list[dict[str, Any]], str, float]:
     fields = {
         "session": session_id,
         "message": message,
         "mode": "agent",
         "multiagent": "true",
         "allow_bash": "true",
-        "allow_web_search": "false",
+        "allow_web_search": "true" if allow_web_search else "false",
     }
+    if workspace:
+        fields["workspace"] = workspace
     body = urllib.parse.urlencode(fields).encode()
     req = urllib.request.Request(
         f"{base_url}/api/chat_stream",
@@ -123,26 +135,45 @@ def _stream_turn(base_url: str, cookie: str, session_id: str, message: str, time
     events: list[dict[str, Any]] = []
     answer = ""
     started = time.time()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        for raw in resp:
-            line = raw.decode("utf-8", errors="replace").strip("\r\n")
-            if not line or line.startswith(":"):
-                continue
-            if line == "data: [DONE]":
-                events.append({"type": "done"})
-                break
-            if not line.startswith("data: "):
-                events.append({"type": "raw", "line": line})
-                continue
-            try:
-                event = json.loads(line[6:])
-            except json.JSONDecodeError:
-                events.append({"type": "bad_json", "payload": line[6:500]})
-                continue
-            events.append(event)
-            delta = event.get("delta")
-            if isinstance(delta, str) and not event.get("thinking"):
-                answer += delta
+    last_semantic = started
+    idle_timeout = min(timeout, int(os.getenv("ODYSSEUS_SMOKE_IDLE_TIMEOUT", "90") or "90"))
+    try:
+        resp_ctx = urllib.request.urlopen(req, timeout=max(1, idle_timeout))
+        with resp_ctx as resp:
+            for raw in resp:
+                now = time.time()
+                if now - started > timeout:
+                    events.append({"type": "error", "error": f"smoke stream exceeded {timeout}s wall-clock timeout"})
+                    break
+                if now - last_semantic > idle_timeout:
+                    events.append({"type": "error", "error": f"smoke stream idle for {idle_timeout}s"})
+                    break
+                line = raw.decode("utf-8", errors="replace").strip("\r\n")
+                if not line or line.startswith(":"):
+                    continue
+                last_semantic = now
+                if line == "data: [DONE]":
+                    events.append({"type": "done"})
+                    break
+                if not line.startswith("data: "):
+                    events.append({"type": "raw", "line": line})
+                    continue
+                try:
+                    event = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    events.append({"type": "bad_json", "payload": line[6:500]})
+                    continue
+                events.append(event)
+                delta = event.get("delta")
+                if isinstance(delta, str) and not event.get("thinking"):
+                    answer += delta
+    except (TimeoutError, socket.timeout) as exc:
+        events.append({"type": "error", "error": f"smoke stream idle timeout after {idle_timeout}s: {exc}"})
+    except urllib.error.URLError as exc:
+        if isinstance(getattr(exc, "reason", None), socket.timeout):
+            events.append({"type": "error", "error": f"smoke stream idle timeout after {idle_timeout}s: {exc}"})
+        else:
+            raise
     return events, answer, time.time() - started
 
 

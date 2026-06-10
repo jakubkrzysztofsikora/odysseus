@@ -1558,7 +1558,20 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                 yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                 return
 
+            _semantic_idle_timeout = _stream_read_timeout_seconds(timeout)
+            _last_semantic_line = time.monotonic()
             async for line in r.aiter_lines():
+                _now = time.monotonic()
+                if line and line.startswith("data:") and line[5:].strip():
+                    _last_semantic_line = _now
+                elif _now - _last_semantic_line > _semantic_idle_timeout:
+                    logger.warning(
+                        "Stream from %s emitted no meaningful SSE data for %.1fs",
+                        target_url,
+                        _semantic_idle_timeout,
+                    )
+                    yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+                    return
                 if not line:
                     continue
 

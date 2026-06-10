@@ -1460,7 +1460,14 @@ def _latest_user_text_for_tool_repair(messages: List[Dict], max_chars: int = 100
             flags=re.IGNORECASE,
         )
         if marker:
-            text = text[marker.end():]
+            primary_handoff = text[:marker.start()]
+            if (
+                _extract_explicit_bash_command(primary_handoff)
+                or _extract_explicit_search_query(primary_handoff)
+            ):
+                text = primary_handoff
+            else:
+                text = text[marker.end():]
     else:
         text = _recent_context_for_retrieval(messages, max_user=3, max_chars=max_chars)
     text = re.sub(r"\s+", " ", text or "").strip()
@@ -1614,9 +1621,17 @@ def _extract_explicit_bash_command(text: str) -> str:
         return ""
     sentence_boundary = r"(?=(?:\.\s+(?:[A-Z]|\d+[\).]))|$)"
     patterns = (
+        r"\brun\s+(?:bash|shell)\s+exactly\s+`([^`]+)`",
+        r"\brun\s+(?:bash|shell)\s+exactly\s+['\"]([^'\"]+)['\"]",
+        r"\brun\s+(?:bash|shell)\s+exactly\s*:\s*(.+?)" + sentence_boundary,
+        r"\brun\s+exactly\s+`([^`]+)`",
+        r"\brun\s+exactly\s+['\"]([^'\"]+)['\"]",
+        r"\brun\s+exactly\s*:\s*(.+?)" + sentence_boundary,
+        r"\brun\s+exactly\s+(.+?)" + sentence_boundary,
         r"(?:bash|shell)[^.]{0,180}?\brun\s+exactly\s+`([^`]+)`",
         r"(?:bash|shell)[^.]{0,180}?\brun\s+exactly\s+['\"]([^'\"]+)['\"]",
         r"(?:bash|shell)[^.]{0,180}?\brun\s+exactly\s*:\s*(.+?)" + sentence_boundary,
+        r"(?:bash|shell)[^.]{0,180}?\brun\s+exactly\s+(.+?)" + sentence_boundary,
         r"(?:bash|shell)[^.]{0,180}?\brun\s*:\s*(.+?)" + sentence_boundary,
         r"(?:bash|shell)[^.]{0,180}?\bwith\s+exactly\s+`([^`]+)`",
         r"(?:bash|shell)[^.]{0,180}?\bwith\s+exactly\s+['\"]([^'\"]+)['\"]",
@@ -1634,6 +1649,13 @@ def _extract_explicit_bash_command(text: str) -> str:
             continue
         command = match.group(1).strip()
         stop_markers = (
+            r";\s+(?=then\s+(?:use|call|answer|return|write|search|summarize|report|provide)\b)",
+            r";\s+(?=also\s+(?:use|call|answer|return|write|search|summarize|report|provide)\b)",
+            r";\s+(?=(?:use|call|answer|return|write|search|summarize|report|provide)\b)",
+            r",\s+(?=then\s+(?:use|call|answer|return|write|search|summarize|report|provide)\b)",
+            r",\s+(?=also\s+(?:use|call|answer|return|write|search|summarize|report|provide)\b)",
+            r",\s+(?=(?:use|call|answer|return|write|search|summarize|report|provide)\b)",
+            r"\s+(?=and\s+(?:then\s+)?(?:use|call|answer|return|write|search|summarize|report|provide)\b)",
             r"\s+(?=After\b)",
             r"\s+(?=Then\b)",
             r"\s+(?=Next\b)",
@@ -1650,10 +1672,14 @@ def _extract_explicit_bash_command(text: str) -> str:
         stops = [
             m.start()
             for marker in stop_markers
-            if (m := re.search(marker, command))
+            if (m := re.search(marker, command, flags=re.IGNORECASE))
         ]
         if stops:
             command = command[: min(stops)].rstrip()
+        if command.endswith(";"):
+            command = command[:-1].rstrip()
+        if command.endswith(","):
+            command = command[:-1].rstrip()
         if command.endswith("."):
             command = command[:-1].rstrip()
         if len(command) >= 2 and command[0] == command[-1] and command[0] in {"'", '"', "`"}:
@@ -1683,7 +1709,7 @@ def _repair_empty_local_tool_blocks(tool_blocks: list, messages: List[Dict]) -> 
             continue
         if not bash_command:
             bash_command = _extract_explicit_bash_command(
-                _latest_user_message_for_arg_repair(messages)
+                _latest_user_text_for_tool_repair(messages)
             )
         if not bash_command:
             repaired.append(block)

@@ -1154,6 +1154,16 @@ FUNCTION_TOOL_SCHEMAS = [
 # Converter: native function call -> ToolBlock
 # ---------------------------------------------------------------------------
 
+def _normalize_bash_command(command: object) -> str:
+    """Trim harmless trailing shell terminators models add to exact commands."""
+    content = str(command or "").strip()
+    while content.endswith(";"):
+        content = content[:-1].rstrip()
+    if len(content) > 1 and content.endswith(",") and content[-2] in {"'", '"', "`"}:
+        content = content[:-1].rstrip()
+    return content
+
+
 def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock]:
     """Convert a native function call into a ToolBlock for the existing execution pipeline."""
     try:
@@ -1162,8 +1172,12 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         else:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
     except (json.JSONDecodeError, TypeError):
-        logger.error(f"Failed to parse function call arguments for {name}: {arguments}")
-        return None
+        if isinstance(arguments, str) and arguments.strip() == "{":
+            logger.warning("Incomplete empty function call arguments for %s; treating as empty", name)
+            args = {}
+        else:
+            logger.error(f"Failed to parse function call arguments for {name}: {arguments}")
+            return None
 
     # Some models emit valid JSON that isn't an object (e.g. a bare array
     # ["ls -la"], string, or number) as the function arguments. Treat useful
@@ -1204,7 +1218,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
 
     # Convert structured args back to the text format each tool expects
     if tool_type == "bash":
-        content = (
+        content = _normalize_bash_command(
             args.get("command")
             or args.get("cmd")
             or args.get("shell_command")

@@ -55,6 +55,27 @@ def test_bash_accepts_common_command_aliases():
         assert block.content == "echo ok"
 
 
+def test_bash_trims_trailing_model_statement_terminator():
+    block = function_call_to_tool_block("bash", '{"command": "printf \\"ODY_GROUP_2\\";"}')
+    assert block is not None
+    assert block.tool_type == "bash"
+    assert block.content == 'printf "ODY_GROUP_2"'
+
+
+def test_bash_trims_trailing_sentence_comma_after_quoted_command():
+    block = function_call_to_tool_block("bash", '{"command": "printf \\"ODY_GROUP_2\\","}')
+    assert block is not None
+    assert block.tool_type == "bash"
+    assert block.content == 'printf "ODY_GROUP_2"'
+
+
+def test_incomplete_empty_object_arguments_become_repairable_empty_bash_block():
+    block = function_call_to_tool_block("bash", "{\n  ")
+    assert block is not None
+    assert block.tool_type == "bash"
+    assert block.content == ""
+
+
 def test_scalar_mcp_arguments_become_single_required_argument():
     mgr = McpManager()
     mgr._tools["remote"] = [
