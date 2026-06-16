@@ -8,6 +8,7 @@ import logging
 import os
 
 from core.auth import AuthManager
+from core.cloudflare_access import display_name_from_email
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
 from src.settings import (
@@ -17,6 +18,8 @@ from src.settings import (
     save_features as _save_features,
     DEFAULT_SETTINGS,
 )
+from src.cloudflare_admin import is_cloudflare_admin
+from src.entra_profile import get_entra_profile_avatar_url
 from src.integrations import (
     load_integrations,
     add_integration,
@@ -81,12 +84,25 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     _setup_limiter = RateLimiter(max_requests=3, window_seconds=300)
 
     def _get_current_user(request: Request) -> Optional[str]:
+        if getattr(request.state, "auth_mode", None) == "cloudflare_access":
+            return getattr(request.state, "current_user", None)
         token = request.cookies.get(SESSION_COOKIE)
         return auth_manager.get_username_for_token(token)
+
+    def _cloudflare_access_mode(request: Request) -> bool:
+        return (
+            getattr(request.app.state, "odysseus_auth_mode", "local") == "cloudflare_access"
+            or getattr(request.state, "auth_mode", None) == "cloudflare_access"
+        )
+
+    def _reject_local_auth_in_cloudflare_mode(request: Request) -> None:
+        if _cloudflare_access_mode(request):
+            raise HTTPException(403, "Local username/password auth is disabled behind Cloudflare Access")
 
     @router.post("/setup")
     async def first_run_setup(body: SetupRequest, request: Request):
         """Create initial admin account. Only works if no accounts exist."""
+        _reject_local_auth_in_cloudflare_mode(request)
         if not _setup_limiter.check(request.client.host):
             raise HTTPException(429, "Too many requests — try again later")
         if auth_manager.is_configured:
@@ -101,6 +117,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     @router.post("/signup")
     async def signup(body: SignupRequest, request: Request):
         """Create a new user account. Only works if signup is enabled by admin."""
+        _reject_local_auth_in_cloudflare_mode(request)
         if not _signup_limiter.check(request.client.host):
             raise HTTPException(429, "Too many requests — try again later")
         if not auth_manager.is_configured:
@@ -118,6 +135,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.post("/login")
     async def login(body: LoginRequest, request: Request, response: Response):
+        _reject_local_auth_in_cloudflare_mode(request)
         if not _login_limiter.check(request.client.host):
             raise HTTPException(429, "Too many requests — try again later")
         # Verify password first
@@ -158,6 +176,28 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.get("/status")
     async def auth_status(request: Request):
+        if _cloudflare_access_mode(request):
+            user = getattr(request.state, "current_user", None)
+            display_name = (
+                getattr(request.state, "cloudflare_access_display_name", None)
+                or display_name_from_email(user or "")
+                or user
+            )
+            avatar_url = getattr(request.state, "cloudflare_access_avatar_url", "") or ""
+            if not avatar_url and user:
+                avatar_url = await get_entra_profile_avatar_url(user)
+            is_admin = is_cloudflare_admin(user)
+            return {
+                "configured": True,
+                "authenticated": bool(user),
+                "username": user,
+                "display_name": display_name,
+                "avatar_url": avatar_url,
+                "is_admin": is_admin,
+                "signup_enabled": False,
+                "auth_mode": "cloudflare_access",
+                "privileges": auth_manager.get_privileges(user) if user and is_admin else {},
+            }
         token = request.cookies.get(SESSION_COOKIE)
         result = auth_manager.status(token)
         result["signup_enabled"] = auth_manager.signup_enabled

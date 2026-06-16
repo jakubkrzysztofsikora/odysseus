@@ -43,9 +43,11 @@ def discover_tailscale_hosts() -> List[str]:
 
     hosts = []
     try:
+        from subprocess_safe import clean_subprocess_env
         result = subprocess.run(
             ["tailscale", "status", "--json"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            env=clean_subprocess_env(),
         )
         if result.returncode != 0:
             return hosts

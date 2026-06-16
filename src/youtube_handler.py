@@ -202,10 +202,12 @@ async def fetch_youtube_comments(
             f"https://www.youtube.com/watch?v={video_id}",
         ]
 
+        from subprocess_safe import clean_subprocess_env
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=clean_subprocess_env(),
         )
         # Bound the wait on the process actually finishing, not on spawning it.
         # create_subprocess_exec returns as soon as the child starts, so wrapping

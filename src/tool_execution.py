@@ -507,6 +507,80 @@ def _owner_is_admin(owner: Optional[str]) -> bool:
 # MCP-backed tool helpers
 # ---------------------------------------------------------------------------
 
+
+async def _exec_bash_or_python(
+    tool: str,
+    content: str,
+    *,
+    timeout: float,
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    workspace: Optional[str] = None,
+    subproc_env: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str, Optional[int], bool]:
+    """Dispatch a bash/python tool call to the sandbox (P2.1) or the local
+    subprocess path, switching on the resolved SANDBOX_MODE.
+
+    Returns ``(stdout, stderr, return_code, timed_out)`` -- the streaming
+    helper's tuple shape -- so the bash/python branches in ``_direct_fallback``
+    parse the result identically regardless of backend.
+
+    SANDBOX_MODE resolution (env wins; default = local for dev inner-loop):
+      * ``isolated`` -> per-run hardened Docker container (no host env, locked-down).
+      * ``local``    -> the historical in-process subprocess (env-inherited).
+
+    The 2.5 boot gate (``sandbox_admission``) refuses to start when SANDBOX_MODE
+    is ``local`` while any enabled connector is non-synthetic, so reaching the
+    local branch here implies synthetic-only data.
+    """
+    mode = (os.environ.get("SANDBOX_MODE") or "local").strip().lower()
+
+    if mode == "isolated":
+        # Lazy import: keep Docker dependency out of the hot path for local dev.
+        from src import sandbox_runner
+        try:
+            return await sandbox_runner.spawn_sandboxed(
+                tool,
+                content,
+                timeout=timeout,
+                progress_cb=progress_cb,
+                workspace=workspace,
+                python_executable=(sys.executable or "python"),
+            )
+        except sandbox_runner.SandboxUnavailableError:
+            # Fail-closed: isolated mode was demanded but Docker is unusable. Do
+            # NOT silently downgrade to the env-inherited local path -- that would
+            # defeat the whole control. Surface as a failed run.
+            return (
+                "",
+                "sandbox: SANDBOX_MODE=isolated but Docker is unavailable -- refusing "
+                "to run uncontained (fail-closed).",
+                126,
+                False,
+            )
+
+    # Local path (synthetic-only per the 2.5 gate). Use clean env to avoid leaking
+    # provider keys / auth tokens to user-invokable bash/python child processes.
+    from subprocess_safe import clean_subprocess_env
+    env = subproc_env if subproc_env is not None else clean_subprocess_env()
+    if tool == "bash":
+        proc = await asyncio.create_subprocess_shell(
+            content,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=workspace or _AGENT_WORKDIR,
+        )
+    else:  # python
+        proc = await asyncio.create_subprocess_exec(
+            (sys.executable or "python"), "-I", "-c", content,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=workspace or _AGENT_WORKDIR,
+        )
+    return await _run_subprocess_streaming(proc, timeout=timeout, progress_cb=progress_cb)
+
+
 # Map legacy tool names -> (MCP server_id, MCP tool_name)
 _MCP_TOOL_MAP = {
     "bash":           ("bash",       "bash"),
@@ -630,35 +704,26 @@ async def _direct_fallback(
     """
     import json as _json
 
-    # Inherit env + force a sane terminal so subprocesses that touch
-    # terminfo (anything calling `clear`, `tput`, `os.system("clear")`,
-    # or scripts that probe $TERM) don't spam "TERM environment variable
-    # not set" errors. The agent's bash/python tool calls run with PIPE
-    # stdin/stdout (no real TTY), so curses/termios still won't work —
-    # but at least non-interactive code with incidental TERM lookups
-    # stops failing. COLUMNS/LINES give terminal-width-aware tools (less,
-    # rich, etc.) reasonable defaults instead of 0×0.
-    _subproc_env = {
-        **os.environ,
+    # Strip secrets from the child env; force a sane terminal so subprocesses
+    # that touch terminfo don't spam "TERM environment variable not set" errors.
+    # COLUMNS/LINES give terminal-width-aware tools reasonable defaults.
+    from subprocess_safe import clean_subprocess_env
+    _subproc_env = clean_subprocess_env(extra={
         "TERM": "xterm-256color",
         "COLUMNS": "120",
         "LINES": "40",
         "HOME": _AGENT_WORKDIR,
-    }
+    })
 
     try:
         if tool == "bash":
-            proc = await asyncio.create_subprocess_shell(
+            stdout, stderr, rc, timed_out = await _exec_bash_or_python(
+                "bash",
                 content,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_subproc_env,
-                cwd=workspace or _AGENT_WORKDIR,
-            )
-            stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
-                proc,
                 timeout=DEFAULT_BASH_TIMEOUT,
                 progress_cb=progress_cb,
+                workspace=workspace,
+                subproc_env=_subproc_env,
             )
             if timed_out:
                 return {"error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
@@ -673,19 +738,13 @@ async def _direct_fallback(
             # Run user code in a subprocess so an infinite loop or crash
             # can't take the whole server down. -I = isolated mode (skip
             # user site, no PYTHONPATH inheritance) for hygiene.
-            proc = await asyncio.create_subprocess_exec(
-                # Use the running interpreter — there is no `python3.exe` on
-                # Windows, which made the agent's `python` tool fail there.
-                (sys.executable or "python"), "-I", "-c", content,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_subproc_env,
-                cwd=workspace or _AGENT_WORKDIR,
-            )
-            stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
-                proc,
+            stdout, stderr, rc, timed_out = await _exec_bash_or_python(
+                "python",
+                content,
                 timeout=DEFAULT_PYTHON_TIMEOUT,
                 progress_cb=progress_cb,
+                workspace=workspace,
+                subproc_env=_subproc_env,
             )
             if timed_out:
                 return {"error": f"python: timed out after {DEFAULT_PYTHON_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
@@ -830,7 +889,8 @@ async def _direct_fallback(
                     cmd += ["--regexp", pattern, root]
                     try:
                         import subprocess
-                        p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+                        from subprocess_safe import clean_subprocess_env as _cse
+                        p = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=_cse())
                         lines = [ln for ln in (p.stdout or "").splitlines() if ln][:max_hits]
                         return lines, None
                     except subprocess.TimeoutExpired:

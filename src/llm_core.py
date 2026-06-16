@@ -174,8 +174,19 @@ ANTHROPIC_MODELS = [
 ]
 
 
+def _is_agentcore_openai_url(url: str) -> bool:
+    """True for the in-process Circit AgentCore OpenAI-compatible adapter."""
+    try:
+        parsed = urlparse(url or "")
+    except Exception:
+        return False
+    return (parsed.path or "").rstrip("/").startswith("/api/agentcore/openai")
+
+
 def _is_ollama_native_url(url: str) -> bool:
     """Return True for native Ollama API URLs, including Ollama Cloud."""
+    if _is_agentcore_openai_url(url):
+        return False
     try:
         parsed = urlparse(url or "")
     except Exception:
@@ -804,6 +815,11 @@ def _normalize_openai_chat_url(url: str) -> str:
         if base.endswith(suffix):
             base = base[: -len(suffix)].rstrip("/")
             break
+    try:
+        if _is_agentcore_openai_url(base) and base.endswith("/chat"):
+            base = base[: -len("/chat")].rstrip("/")
+    except Exception:
+        pass
     return base + "/chat/completions"
 
 
@@ -1083,6 +1099,16 @@ async def llm_call_async(
     prompt_type: Optional[str] = None
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
+    # P6.2 egress chokepoint: authorize the outbound host (allowlist + connect-
+    # time IP pin) and apply fail-closed DLP BEFORE any provider work. Agent-
+    # influenced base_urls (e.g. a scheduled task's req.endpoint_url) that an
+    # admin never configured are rejected here. EgressDenied -> 502 so the
+    # caller fails closed rather than silently leaking the conversation.
+    from src.egress_guard import guard_egress, EgressDenied
+    try:
+        url = guard_egress(url)
+    except EgressDenied as _eg:
+        raise HTTPException(502, str(_eg)) from _eg
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
@@ -1200,6 +1226,16 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
       - event: error                       — errors
       - data: [DONE]                       — end of stream
     """
+    # P6.2 egress chokepoint (streaming path). Same allowlist + IP-pin + DLP as
+    # llm_call_async; because this is an SSE generator we surface a refusal as
+    # an `event: error` frame (matching the _is_host_dead contract below) rather
+    # than raising, so a blocked base_url cleanly ends the stream client-side.
+    from src.egress_guard import guard_egress, EgressDenied
+    try:
+        url = guard_egress(url)
+    except EgressDenied as _eg:
+        yield f'event: error\ndata: {json.dumps({"error": str(_eg), "status": 502})}\n\n'
+        return
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 

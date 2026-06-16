@@ -67,6 +67,22 @@ class ChatContext:
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
 
+def form_flag_enabled(value: Any, *, default: bool = False) -> bool:
+    """Coerce browser form flags without treating "false" as truthy."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disable", "disabled", ""}:
+        return False
+    return default
+
+
 def _enforce_chat_privileges(request, sess) -> None:
     """Apply the per-user privilege gates (allowed_models + max_messages_per_day)
     that both /api/chat and /api/chat_stream must enforce BEFORE any LLM work.
@@ -332,7 +348,7 @@ def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
 def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
     """Ensure session has auth headers — resolve from endpoint DB if missing."""
     has_auth = sess.headers and isinstance(sess.headers, dict) and any(
-        k.lower() in ('authorization', 'x-api-key') for k in sess.headers
+        k.lower() in ('authorization', 'x-api-key', 'x-circit-user') for k in sess.headers
     )
     if has_auth:
         return
@@ -354,10 +370,11 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
             for ep in q.all():
                 if not _session_url_matches_endpoint(target_url, ep.base_url or ""):
                     continue
-                if not ep.api_key:
-                    return
                 base = normalize_base(ep.base_url or "")
-                sess.headers = build_headers(ep.api_key, base)
+                from src.endpoint_resolver import is_agentcore_openai_base
+                if not ep.api_key and not is_agentcore_openai_base(base):
+                    return
+                sess.headers = build_headers(ep.api_key, base, owner=owner)
                 update_q = db.query(DBSession).filter(DBSession.id == session_id)
                 if owner:
                     update_q = update_q.filter(DBSession.owner == owner)
@@ -489,7 +506,7 @@ async def build_chat_context(
     )
 
     # Use RAG?
-    use_rag_val = (str(use_rag).lower() != "false") if use_rag is not None else True
+    use_rag_val = form_flag_enabled(use_rag, default=True)
     if incognito:
         use_rag_val = False
 
@@ -503,7 +520,7 @@ async def build_chat_context(
     _preface_kwargs = dict(
         message=_ctx_msg,
         session=sess,
-        use_web=use_web and not skip_web,
+        use_web=form_flag_enabled(use_web, default=False) and not skip_web,
         use_memory=mem_enabled,
         time_filter=time_filter,
         preset_system_prompt=preset.system_prompt,

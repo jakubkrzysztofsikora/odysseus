@@ -15,10 +15,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
 import httpx
+
+# Internal API base URL - configurable via env var, defaults to localhost:7000
+_INTERNAL_API_BASE = os.getenv("ODYSSEUS_INTERNAL_API_URL", "http://localhost:7000")
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +62,7 @@ async def _delete_endpoint_for_task(task: dict) -> None:
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get(
-                "http://localhost:7000/api/model-endpoints",
+                f"{_INTERNAL_API_BASE}/api/model-endpoints",
                 headers=_internal_headers(),
             )
             if r.status_code >= 400:
@@ -73,7 +77,7 @@ async def _delete_endpoint_for_task(task: dict) -> None:
                 ep = next((e for e in eps if hostport in (e.get("base_url") or "")), None)
             if ep:
                 await client.delete(
-                    f"http://localhost:7000/api/model-endpoints/{ep['id']}",
+                    f"{_INTERNAL_API_BASE}/api/model-endpoints/{ep['id']}",
                     headers=_internal_headers(),
                 )
                 logger.info(
@@ -108,7 +112,7 @@ async def _stop_serve(session_id: str, remote_host: str = "", ssh_port: str = ""
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
-                "http://localhost:7000/api/shell/exec",
+                f"{_INTERNAL_API_BASE}/api/shell/exec",
                 json={"command": cmd},
                 headers=_internal_headers(),
             )

@@ -1,0 +1,13 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "myapp_db",
+    "user": "app_user"
+  },
+  "features": {
+    "enable_query_tool": true,
+    "enable_schema_tool": true,
+    "max_query_timeout": 30
+  }
+}

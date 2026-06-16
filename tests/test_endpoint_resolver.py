@@ -46,11 +46,22 @@ def _endpoint_enabled_models(ep) -> list:
     hidden = _endpoint_hidden_models(ep)
     return [m for m in _endpoint_cached_models(ep) if m not in hidden]
 
+
+def is_agentcore_openai_base(base: str) -> bool:
+    try:
+        parsed = urlparse(base or "")
+    except Exception:
+        return False
+    return (parsed.path or "").rstrip("/").startswith("/api/agentcore/openai")
+
+
 def normalize_base(url: str) -> str:
     url = (url or "").strip().rstrip("/")
     for suffix in ["/models", "/chat/completions", "/completions", "/v1/messages"]:
         if url.endswith(suffix):
             url = url[: -len(suffix)].rstrip("/")
+    if is_agentcore_openai_base(url) and url.endswith("/chat"):
+        url = url[: -len("/chat")].rstrip("/")
     for suffix in ["/chat", "/tags", "/generate"]:
         if url.endswith("/api" + suffix):
             url = url[: -len(suffix)].rstrip("/")
@@ -81,6 +92,8 @@ def _ollama_api_root(base: str) -> str:
 
 
 def build_chat_url(base: str) -> str:
+    if is_agentcore_openai_base(base):
+        return normalize_base(base) + "/chat/completions"
     provider = _detect_provider(base)
     if provider == "anthropic":
         host = urlparse(base).hostname or ""
@@ -149,6 +162,15 @@ class TestBuildChatUrl:
 
     def test_local_endpoint(self):
         assert build_chat_url("http://localhost:8000/v1") == "http://localhost:8000/v1/chat/completions"
+
+    def test_agentcore_openai_base(self):
+        base = "http://127.0.0.1:7000/api/agentcore/openai/v1"
+        assert build_chat_url(base) == f"{base}/chat/completions"
+
+    def test_agentcore_openai_short_chat_base(self):
+        base = "http://127.0.0.1:7000/api/agentcore/openai/v1"
+        assert normalize_base(f"{base}/chat") == base
+        assert build_chat_url(f"{base}/chat") == f"{base}/chat/completions"
 
     def test_ollama_cloud_native_api(self):
         assert build_chat_url("https://ollama.com/api") == "https://ollama.com/api/chat"

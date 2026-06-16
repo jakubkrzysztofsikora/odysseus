@@ -128,12 +128,14 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         )
         argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
 
+    from subprocess_safe import clean_subprocess_env
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
         cwd=cwd or None,
+        env=clean_subprocess_env(),
         **detached_popen_kwargs(),  # detach from the request lifecycle (setsid / DETACHED_PROCESS)
     )
 

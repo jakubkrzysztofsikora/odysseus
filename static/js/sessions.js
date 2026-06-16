@@ -62,7 +62,7 @@ function _deselectCurrentSession(sid) {
   if (currentSessionId !== sid) return;
   currentSessionId = null;
   uiModule.el('chat-history').innerHTML = '';
-  uiModule.el('current-meta').textContent = 'Odysseus Chat';
+  uiModule.el('current-meta').textContent = 'Circit AI Chat';
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
   if (window.chatModule && window.chatModule.showWelcomeScreen) {
@@ -1384,16 +1384,21 @@ export async function loadSessions() {
         savedId = null;
       }
     }
+    const hashTarget = hashId && activeSessions.some(s => s.id === hashId);
+    if (hashTarget && _pendingChat) {
+      _pendingChat = null;
+      _skipAutoSelect = false;
+    }
     const hasPendingChat = !!_pendingChat;
     let targetId = null;
-    if (hasPendingChat) {
+    if (hashTarget) {
+      targetId = hashId;
+    } else if (hasPendingChat) {
       // A model was picked and the UI is showing a fresh New Chat, but the
       // session is not created until the first message. Background stream
       // completions call loadSessions() later; without this guard that reload
       // sees no current session and auto-selects the previous chat.
       targetId = null;
-    } else if (hashId && activeSessions.some(s => s.id === hashId)) {
-      targetId = hashId;
     } else if (currentSessionId && activeSessions.some(s => s.id === currentSessionId)) {
       targetId = currentSessionId;
     } else if (currentSessionId) {
@@ -1573,7 +1578,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
 
     const currentMetaEl = uiModule.el('current-meta');
     if (currentMetaEl) {
-      currentMetaEl.textContent = meta ? meta.name : 'Odysseus Chat';
+      currentMetaEl.textContent = meta ? meta.name : 'Circit AI Chat';
     }
     // Update model picker visibility
     updateModelPicker();
@@ -2004,7 +2009,11 @@ window.addEventListener('hashchange', () => {
   const hashId = window.location.hash.replace('#', '');
   if (hashId && hashId !== currentSessionId) {
     const target = sessions.find(s => s.id === hashId && !s.archived);
-    if (target) selectSession(hashId);
+    if (target) {
+      _pendingChat = null;
+      _skipAutoSelect = false;
+      selectSession(hashId);
+    }
   }
 });
 

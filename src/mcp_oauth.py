@@ -83,8 +83,9 @@ def clear_auth_url(server_id: str) -> None:
 class DbTokenStorage:
     """SDK TokenStorage backed by the encrypted McpServer.oauth_tokens column."""
 
-    def __init__(self, server_id: str, session_factory=None):
+    def __init__(self, server_id: str, session_factory=None, configured_client: Optional[dict] = None):
         self.server_id = server_id
+        self._configured_client = configured_client or None
         if session_factory is None:
             from core.database import SessionLocal
             session_factory = SessionLocal
@@ -128,13 +129,16 @@ class DbTokenStorage:
     async def get_client_info(self):
         from mcp.shared.auth import OAuthClientInformationFull
         data = self._load().get("client_info")
+        if self._configured_client:
+            if not data or data.get("client_id") != self._configured_client.get("client_id"):
+                return OAuthClientInformationFull.model_validate(self._configured_client)
         return OAuthClientInformationFull.model_validate(data) if data else None
 
     async def set_client_info(self, client_info) -> None:
         self._update("client_info", json.loads(client_info.model_dump_json()))
 
 
-def build_provider(server_id: str, url: str, on_redirect=None):
+def build_provider(server_id: str, url: str, on_redirect=None, oauth_config: Optional[dict] = None):
     """Construct an OAuthClientProvider that drives the browser flow via the
     Odysseus callback route.
 
@@ -146,17 +150,36 @@ def build_provider(server_id: str, url: str, on_redirect=None):
     from mcp.client.auth import OAuthClientProvider
     from mcp.shared.auth import OAuthClientMetadata
 
+    oauth_config = oauth_config or {}
+    redirect_uris = oauth_config.get("redirect_uris") or [REDIRECT_URI]
+    scope = oauth_config.get("scope") or oauth_config.get("scopes")
+    if isinstance(scope, list):
+        scope = " ".join(scope)
+
+    configured_client = None
+    if oauth_config.get("client_id"):
+        configured_client = {
+            "client_id": oauth_config["client_id"],
+            "client_secret": oauth_config.get("client_secret"),
+            "token_endpoint_auth_method": oauth_config.get("token_endpoint_auth_method", "none"),
+            "redirect_uris": redirect_uris,
+            "grant_types": oauth_config.get("grant_types", ["authorization_code", "refresh_token"]),
+            "response_types": oauth_config.get("response_types", ["code"]),
+            "scope": scope,
+            "client_name": oauth_config.get("client_name", "Circitron"),
+        }
+
     client_metadata = OAuthClientMetadata(
-        client_name="Odysseus",
-        redirect_uris=[REDIRECT_URI],
-        grant_types=["authorization_code", "refresh_token"],
-        response_types=["code"],
+        client_name=oauth_config.get("client_name", "Circitron"),
+        redirect_uris=redirect_uris,
+        grant_types=oauth_config.get("grant_types", ["authorization_code", "refresh_token"]),
+        response_types=oauth_config.get("response_types", ["code"]),
         # Leave scope unset: the SDK applies the MCP scope-selection strategy and
         # overwrites this from the server's WWW-Authenticate / protected-resource
         # metadata before building the auth URL. Hardcoding an OIDC scope here
         # would break the many MCP servers that are not OpenID providers.
-        scope=None,
-        token_endpoint_auth_method="none",
+        scope=scope,
+        token_endpoint_auth_method=oauth_config.get("token_endpoint_auth_method", "none"),
     )
 
     async def redirect_handler(authorization_url: str) -> None:
@@ -187,7 +210,8 @@ def build_provider(server_id: str, url: str, on_redirect=None):
     return OAuthClientProvider(
         server_url=url,
         client_metadata=client_metadata,
-        storage=DbTokenStorage(server_id),
+        storage=DbTokenStorage(server_id, configured_client=configured_client),
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
+        client_metadata_url=oauth_config.get("client_metadata_url"),
     )

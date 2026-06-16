@@ -11,6 +11,9 @@ from datetime import datetime
 from typing import Tuple
 
 from src.auth_helpers import owner_filter
+
+# Internal API base URL - configurable via env var, defaults to localhost:7000
+_INTERNAL_API_BASE = os.getenv("ODYSSEUS_INTERNAL_API_URL", "http://localhost:7000")
 from core.platform_compat import IS_WINDOWS, find_bash
 
 logger = logging.getLogger(__name__)
@@ -288,9 +291,11 @@ async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, labe
     asyncio.to_thread so the event loop stays responsive."""
     import asyncio
     import subprocess
+    from subprocess_safe import clean_subprocess_env
     try:
         result = await asyncio.to_thread(
             subprocess.run, argv, shell=shell, capture_output=True, text=True, timeout=timeout,
+            env=clean_subprocess_env(),
         )
         output = (result.stdout or "").strip()
         if result.returncode != 0 and result.stderr:
@@ -2116,7 +2121,7 @@ async def action_cookbook_serve(
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post("http://localhost:7000/api/model/serve",
+            r = await client.post(f"{_INTERNAL_API_BASE}/api/model/serve",
                                   json=body, headers=headers)
             data = r.json() if r.content else {}
     except Exception as e:

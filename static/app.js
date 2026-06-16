@@ -23,6 +23,7 @@ import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
 import tasksModule from './js/tasks.js';
+import evidenceModule from './js/evidence.js';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
@@ -67,6 +68,35 @@ window.fetch = async function(...args) {
 
 
 const el = uiModule.el;
+
+function displayNameFromAuthStatus(d) {
+  const email = String(d?.username || '').trim();
+  const name = String(d?.display_name || d?.name || '').trim();
+  if (name) return name;
+  if (!email.includes('@')) return email;
+  const local = email.split('@')[0] || email;
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  return parts.length ? parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ') : email;
+}
+
+function renderUserAvatar(target, displayName, username, avatarUrl) {
+  if (!target) return;
+  target.innerHTML = '';
+  const url = String(avatarUrl || '').trim();
+  if (/^(https?:\/\/|data:image\/|blob:|\/)/i.test(url)) {
+    const img = document.createElement('img');
+    img.alt = displayName || username || 'User';
+    img.src = url;
+    img.referrerPolicy = 'no-referrer';
+    img.onerror = () => {
+      target.innerHTML = '';
+      target.textContent = (displayName || username || '?').charAt(0).toUpperCase();
+    };
+    target.appendChild(img);
+    return;
+  }
+  target.textContent = (displayName || username || '?').charAt(0).toUpperCase();
+}
 
 // Default chat config — refreshed on every new-chat action so settings
 // changes take effect immediately (previously cached once at page load and
@@ -351,7 +381,7 @@ function initializeEventListeners() {
       e.stopPropagation();
       exportMenu.classList.remove('open');
       const meta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
-      const sessionName = meta ? meta.name : 'Odysseus Chat';
+      const sessionName = meta ? meta.name : 'Circit AI Chat';
       const originalTitle = document.title;
       document.title = sessionName;
       const chatHistory = document.getElementById('chat-history');
@@ -554,7 +584,7 @@ function initializeEventListeners() {
       };
 
       // Dynamic modals (removed from DOM on close)
-      const dynamicModals = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal', 'email-lib-modal'];
+      const dynamicModals = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal', 'evidence-modal', 'email-lib-modal'];
       for (const id of dynamicModals) {
         const m = document.getElementById(id);
         if (id === 'gallery-modal') {
@@ -602,7 +632,7 @@ function initializeEventListeners() {
     'memory-modal': null,
     'theme-modal': null,
   };
-  const _dynamicModalIds = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal'];
+  const _dynamicModalIds = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal', 'evidence-modal'];
   function dismissModal(modal) {
     if (!modal || modal.classList.contains('hidden')) return;
     if (modal.id === 'gallery-modal') {
@@ -749,7 +779,7 @@ function initializeEventListeners() {
     const welcomeName = document.querySelector('.welcome-name');
     const welcomeSub = el('welcome-sub');
     const tipEl = el('welcome-tip');
-    const _resIco = '<svg class="welcome-boat" style="position:relative;top:0.5px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
+    const _resIco = '<svg class="welcome-icon" style="position:relative;top:0.5px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
     if (active) {
       if (welcomeName) {
         if (!welcomeName.dataset.researchOrigHtml) welcomeName.dataset.researchOrigHtml = welcomeName.innerHTML;
@@ -879,18 +909,31 @@ function initializeEventListeners() {
   // Tasks tool button
   const toolTasksBtn = el('tool-tasks-btn');
   if (toolTasksBtn) {
-  // Agents buttons (sidebar + rail)
-  const agentsBtns = [el("rail-agents"), el("tool-agents-btn")].filter(Boolean);
-  agentsBtns.forEach(btn => {
-    btn.addEventListener("click", () => {
-    });
-  });
     toolTasksBtn.addEventListener('click', () => {
       if (tasksModule) {
         tasksModule.isTasksOpen() ? tasksModule.closeTasks() : tasksModule.openTasks();
       }
     });
   }
+
+  // Agents buttons (sidebar + rail)
+  const agentsBtns = [el("rail-agents"), el("tool-agents-btn")].filter(Boolean);
+  agentsBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+    });
+  });
+
+  // Evidence tool button
+  const toggleEvidence = async () => {
+    if (!evidenceModule) return;
+    const Modals = await import('./js/modalManager.js');
+    if (!Modals.toggle('evidence-modal')) {
+      evidenceModule.isEvidenceOpen() ? evidenceModule.closeEvidence() : evidenceModule.openEvidence();
+    }
+  };
+  [el('tool-evidence-btn'), el('rail-evidence')].filter(Boolean).forEach(btn => {
+    btn.addEventListener('click', toggleEvidence);
+  });
 
   // Calendar tool button
   const toolCalendarBtn = el('tool-calendar-btn');
@@ -1134,18 +1177,14 @@ function initializeEventListeners() {
     .then(d => {
       window._isAdmin = !!d.is_admin;
       if (d.is_admin && userBarAdmin) userBarAdmin.style.display = '';
+      try { window.dispatchEvent(new CustomEvent('odysseus:auth-status', { detail: d })); } catch (_) {}
       const userBarName = el('user-bar-name');
       const userBarAvatar = el('user-bar-avatar');
       if (userBarName && d.username) {
-        let displayName = d.username;
-        // Mask email addresses
-        if (displayName.includes('@')) {
-          const [local, domain] = displayName.split('@');
-          const ext = domain.includes('.') ? domain.slice(domain.lastIndexOf('.')) : '';
-          displayName = local.charAt(0) + '•••@••••' + ext;
-        }
+        const displayName = displayNameFromAuthStatus(d);
         userBarName.textContent = displayName;
-        if (userBarAvatar) userBarAvatar.textContent = d.username.charAt(0).toUpperCase();
+        userBarName.title = d.username;
+        renderUserAvatar(userBarAvatar, displayName, d.username, d.avatar_url);
       }
       // Apply per-user privilege restrictions
       if (d.privileges) {
@@ -2115,7 +2154,7 @@ function initializeEventListeners() {
       pickerWrap.classList.toggle('picker-auto-hidden', w < PICKER_HIDE_WIDTH);
       // Hide placeholder text
       if (textarea) {
-        textarea.setAttribute('placeholder', w < PLACEHOLDER_HIDE_WIDTH ? '' : 'Message Odysseus...');
+        textarea.setAttribute('placeholder', w < PLACEHOLDER_HIDE_WIDTH ? '' : 'Message Circit AI...');
       }
       // Hide entire bottom toolbar (tools, mode toggle) — only send button remains
       if (inputBottom) {
@@ -2285,7 +2324,7 @@ function initializeEventListeners() {
         incognitoBtn.innerHTML = INCOGNITO_EYE_CLOSED + '<span class="incognito-label">Nobody</span>';
         if (welcomeName) {
           welcomeName.dataset.originalHtml = welcomeName.innerHTML;
-          welcomeName.innerHTML = '<svg class="welcome-boat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>Nobody';
+          welcomeName.innerHTML = '<svg class="welcome-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>Nobody';
           // Restart the L→R clip-wipe reveal on the new label
           welcomeName.style.animation = 'none';
           welcomeName.offsetHeight;
@@ -2392,6 +2431,7 @@ function initializeEventListeners() {
     'tool-calendar':       '#tool-calendar-btn',
     'tool-compare':        '#tool-compare-btn',
     'tool-cookbook':       '#tool-cookbook-btn',
+    'tool-evidence':       '#tool-evidence-btn',
     'tool-research':       '#tool-research-btn',
     'tool-gallery':        '#tool-gallery-btn',
     'tool-library':        '#tool-library-btn',
@@ -3928,7 +3968,7 @@ function startOdysseusApp() {
     const hasModels = modelsBox && modelsBox.querySelector('.models-row');
     if (!hasModels) {
       const tip = document.getElementById('welcome-tip');
-      if (tip) tip.textContent = 'Add an AI endpoint from Settings in the sidebar, or paste an endpoint/API key into the chat.';
+      if (tip) tip.textContent = 'Circit AgentCore is the default model backend. Contact an admin if no model appears.';
     }
   }).catch(() => {});
   modelsModule.refreshProviders();

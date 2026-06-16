@@ -1,0 +1,16 @@
+{
+  "hooks": [
+    {
+      "type": "PreToolUse",
+      "name": "security-guard-block-dangerous-commands",
+      "prompt": "You are a security guard for shell commands. Analyze the following command and determine if it should be allowed.\n\nCommand: ${input}\n\nRules:\n- Block any command containing 'rm -rf', 'dd ', 'mkfs', 'chmod -R 777', or 'wget.*--post-data'\n- Allow all other commands\n\nRespond with ONLY one of these:\n- 'approve' if the command is safe\n- 'deny: <reason>' if the command is dangerous (replace <reason> with a brief explanation)",
+      "timeout": 5
+    },
+    {
+      "type": "SessionStart",
+      "name": "security-guard-session-logger",
+      "command": ["bash", "${CLAUDE_PLUGIN_ROOT}/hooks/session_logger.sh"],
+      "timeout": 10
+    }
+  ]
+}

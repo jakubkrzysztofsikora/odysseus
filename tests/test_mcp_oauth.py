@@ -39,10 +39,30 @@ def test_register_pending_prunes_abandoned_flows():
 def test_build_provider_has_odysseus_client_metadata():
     p = mcp_oauth.build_provider("srv-1", "https://example.com/mcp")
     md = p.context.client_metadata
-    assert md.client_name == "Odysseus"
+    assert md.client_name == "Circitron"
     assert "authorization_code" in md.grant_types
     assert "refresh_token" in md.grant_types
     assert str(md.redirect_uris[0]).rstrip("/") == mcp_oauth.REDIRECT_URI.rstrip("/")
+
+
+def test_build_provider_uses_configured_client_info():
+    async def go():
+        p = mcp_oauth.build_provider(
+            "srv-1",
+            "https://example.com/mcp",
+            oauth_config={
+                "client_id": "client-123",
+                "client_secret": "secret-123",
+                "token_endpoint_auth_method": "client_secret_post",
+                "redirect_uris": ["https://cowork.circit.ai/api/mcp/oauth/callback"],
+            },
+        )
+        return await p.context.storage.get_client_info()
+
+    client = asyncio.run(go())
+    assert client.client_id == "client-123"
+    assert client.client_secret == "secret-123"
+    assert client.token_endpoint_auth_method == "client_secret_post"
 
 
 def test_db_token_storage_round_trip():

@@ -10,7 +10,18 @@ corrupting — its arguments) and must preserve extra_content per call.
 import json
 import asyncio
 
+import pytest
+
 from src import llm_core
+
+
+@pytest.fixture(autouse=True)
+def _reset_egress_admin_hosts():
+    """Each test seeds its canned host as an admin endpoint via _drive; reset
+    the egress-guard provider afterwards so state never leaks between tests."""
+    yield
+    from src import egress_guard
+    egress_guard.set_admin_hosts_provider(None)
 
 
 class _FakeResp:
@@ -60,6 +71,13 @@ def _drive(
     monkeypatch.setattr(llm_core, "_is_host_dead", lambda u: False)
     monkeypatch.setattr(llm_core, "note_model_activity", lambda *a, **k: None)
     monkeypatch.setattr(llm_core, "_clear_host_dead", lambda *a, **k: None)
+    # P6.2 egress guard: treat the canned test URL's host as an admin-configured
+    # endpoint so the guard authorizes it (a private Tailscale litellm host is
+    # reachable in prod only because an admin added the ModelEndpoint row).
+    from urllib.parse import urlsplit
+    from src import egress_guard
+    _h = (urlsplit(url).hostname or "").lower()
+    egress_guard.set_admin_hosts_provider(lambda: frozenset({_h}))
 
     async def run():
         events = []

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.circit.app/connector-manifest/v1.json",
+  "title": "Circit Connector Manifest",
+  "description": "Canonical, vendored contract describing a sandbox connector (data source / tool surface). Source of truth lives in the cowork repo /contracts; Odysseus vendors a byte-identical copy under its own /contracts. The 2.5 admission gate in BOTH backends keys its fail-closed decision off `dataClass`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "name", "egress"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Manifest contract version. Pinned so a backend can refuse a manifest it does not understand (fail-closed).",
+      "const": "1.0.0"
+    },
+    "id": {
+      "type": "string",
+      "description": "Stable connector identifier, referenced by audit events (dataSourceId).",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "dataClass": {
+      "type": "string",
+      "description": "Sensitivity tier of the data this connector exposes. Default to the most restrictive (banking) when absent so an omitted field cannot widen access. The 2.5 gate refuses boot when SANDBOX_MODE != isolated and any enabled connector is NOT synthetic.",
+      "enum": ["synthetic", "internal", "banking"],
+      "default": "banking"
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Whether this connector is active in the running deployment. Disabled connectors are excluded from the 2.5 admission check.",
+      "default": false
+    },
+    "untrustedOutput": {
+      "type": "boolean",
+      "description": "Whether output from this connector must be wrapped before model re-ingestion. Fail-closed default is true.",
+      "default": true
+    },
+    "egress": {
+      "type": "object",
+      "description": "Outbound network policy for sandbox runs that use this connector. Deny-by-default; only the listed hosts are reachable, and every entry is still subnet-checked against url_security._BLOCKED_NETWORKS at runtime (2.2).",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["deny-all", "allowlist"],
+          "default": "deny-all"
+        },
+        "allowedHosts": {
+          "type": "array",
+          "description": "Host or host:port entries permitted when mode=allowlist. RFC-1918 / IMDS / loopback targets are rejected at runtime regardless of inclusion here.",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "default": []
+        }
+      }
+    },
+    "dualControl": {
+      "type": "object",
+      "description": "P3 connector layer attaches approver requirements here. Present in the v1 contract so P3 does not need a schema bump.",
+      "additionalProperties": false,
+      "properties": {
+        "required": { "type": "boolean", "default": false },
+        "approvers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 0
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "egress": { "properties": { "mode": { "const": "allowlist" } } } }
+      },
+      "then": {
+        "properties": {
+          "egress": { "required": ["allowedHosts"] }
+        }
+      }
+    }
+  ]
+}

@@ -1112,8 +1112,56 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         agent_loop.TOOL_SECTIONS (the same descriptions the model is given)."""
         import re
 
-        def _clean(raw: str) -> str:
+        def _cloudflare_mode() -> bool:
+            try:
+                from src.cloudflare_admin import cloudflare_mode_enabled
+                return (
+                    getattr(request.state, "auth_mode", None) == "cloudflare_access"
+                    or cloudflare_mode_enabled()
+                )
+            except Exception:
+                return False
+
+        cloudflare_catalog = _cloudflare_mode()
+
+        cloudflare_descriptions = {
+            "app_api": "Generic loopback to Circitron internal endpoints. Use only when no named tool covers a UI action.",
+            "ask_teacher": "Escalate a hard question through Circitron's configured reasoning path. Backend model details are not exposed.",
+            "chat_with_model": "Ask Circitron in a separate context when useful. The public chat capability is Circitron.",
+            "create_session": "Create a new chat using Circitron by default.",
+            "download_model": "Admin-only model artifact operation. Regular users cannot download or add models in this deployment.",
+            "generate_image": "Generate an image from a prompt using the configured Circitron image capability.",
+            "list_cached_models": "Admin-only runtime inventory. Regular users see Circitron as the public chat capability.",
+            "list_downloads": "Admin-only model artifact download status.",
+            "list_models": "Show the available public chat capability. In this deployment it returns Circitron.",
+            "list_served_models": "Admin-only runtime status for model-serving infrastructure.",
+            "manage_endpoints": "Admin-only Circitron routing controls. Regular users cannot add or change model providers.",
+            "pipeline": "Run a multi-step Circitron workflow.",
+            "search_hf_models": "Admin-only model catalog search. Regular users use Circitron.",
+            "serve_model": "Admin-only model-serving operation. Regular users cannot add or serve models in this deployment.",
+            "stop_served_model": "Admin-only model-serving stop operation.",
+            "tail_serve_output": "Admin-only runtime log inspection for model-serving operations.",
+        }
+
+        def _sanitize_cloudflare_text(name: str, text: str) -> str:
+            if not cloudflare_catalog:
+                return text
+            if name in cloudflare_descriptions:
+                return cloudflare_descriptions[name]
+            return (
+                text.replace("Odysseus internal endpoint", "Circitron internal endpoint")
+                    .replace("Odysseus API endpoint", "Circitron API endpoint")
+                    .replace("Odysseus", "Circitron")
+                    .replace("Qwen/Qwen3-8B", "<model-repo>")
+                    .replace("qwen 8b", "model search")
+                    .replace("qwen", "model")
+                    .replace("Qwen", "Model")
+                    .replace("gpt-4o", "circitron")
+            )
+
+        def _clean(name: str, raw: str) -> str:
             s = raw or ""
+            s = _sanitize_cloudflare_text(name, s)
             s = re.sub(r"```.*?```", "", s, flags=re.S)   # drop code fences (incl. inline ```name```)
             s = re.sub(r"\s+", " ", s).strip()
             s = re.sub(r"^[-–—:\s]+", "", s)              # drop leftover "- — " / ": " bullet prefix
@@ -1134,7 +1182,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
                     eff = overrides.get(nm, raw)
                     out.append({
                         "name": nm,
-                        "description": _clean(eff),
+                        "description": _clean(nm, eff),
                         "is_overridden": overridden,
                     })
         out.sort(key=lambda x: x["name"])
@@ -1157,9 +1205,69 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if default is None:
             raise HTTPException(404, f"No built-in tool named {name!r}")
         overrides = get_builtin_overrides()
+        def _cloudflare_mode() -> bool:
+            try:
+                from src.cloudflare_admin import cloudflare_mode_enabled
+                return (
+                    getattr(request.state, "auth_mode", None) == "cloudflare_access"
+                    or cloudflare_mode_enabled()
+                )
+            except Exception:
+                return False
+
+        if _cloudflare_mode():
+            cloudflare_texts = {
+                "app_api": "Generic loopback to Circitron internal endpoints. Use only when no named tool covers a UI action.",
+                "ask_teacher": "Escalate a hard question through Circitron's configured reasoning path. Backend model details are not exposed.",
+                "chat_with_model": "Ask Circitron in a separate context when useful. The public chat capability is Circitron.",
+                "create_session": "Create a new chat using Circitron by default.",
+                "download_model": "Admin-only model artifact operation. Regular users cannot download or add models in this deployment.",
+                "generate_image": "Generate an image from a prompt using the configured Circitron image capability.",
+                "list_cached_models": "Admin-only runtime inventory. Regular users see Circitron as the public chat capability.",
+                "list_downloads": "Admin-only model artifact download status.",
+                "list_models": "Show the available public chat capability. In this deployment it returns Circitron.",
+                "list_served_models": "Admin-only runtime status for model-serving infrastructure.",
+                "manage_endpoints": "Admin-only Circitron routing controls. Regular users cannot add or change model providers.",
+                "pipeline": "Run a multi-step Circitron workflow.",
+                "search_hf_models": "Admin-only model catalog search. Regular users use Circitron.",
+                "serve_model": "Admin-only model-serving operation. Regular users cannot add or serve models in this deployment.",
+                "stop_served_model": "Admin-only model-serving stop operation.",
+                "tail_serve_output": "Admin-only runtime log inspection for model-serving operations.",
+            }
+            text = cloudflare_texts.get(name)
+            if text:
+                return {
+                    "name": name,
+                    "text": text,
+                    "default": text,
+                    "is_overridden": name in overrides,
+                }
+
+        effective = overrides.get(name, default)
+        if _cloudflare_mode():
+            effective = (
+                effective.replace("Odysseus internal endpoint", "Circitron internal endpoint")
+                    .replace("Odysseus API endpoint", "Circitron API endpoint")
+                    .replace("Odysseus", "Circitron")
+                    .replace("Qwen/Qwen3-8B", "<model-repo>")
+                    .replace("qwen 8b", "model search")
+                    .replace("qwen", "model")
+                    .replace("Qwen", "Model")
+                    .replace("gpt-4o", "circitron")
+            )
+            default = (
+                default.replace("Odysseus internal endpoint", "Circitron internal endpoint")
+                    .replace("Odysseus API endpoint", "Circitron API endpoint")
+                    .replace("Odysseus", "Circitron")
+                    .replace("Qwen/Qwen3-8B", "<model-repo>")
+                    .replace("qwen 8b", "model search")
+                    .replace("qwen", "model")
+                    .replace("Qwen", "Model")
+                    .replace("gpt-4o", "circitron")
+            )
         return {
             "name": name,
-            "text": overrides.get(name, default),
+            "text": effective,
             "default": default,
             "is_overridden": name in overrides,
         }

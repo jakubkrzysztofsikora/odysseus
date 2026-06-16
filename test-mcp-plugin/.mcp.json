@@ -1,0 +1,20 @@
+{
+  "database-tools": {
+    "command": "${CLAUDE_PLUGIN_ROOT}/servers/db-server.py",
+    "args": ["--config", "${CLAUDE_PLUGIN_ROOT}/config/config.json"],
+    "env": {
+      "DATABASE_URL": "${DATABASE_URL}",
+      "DB_HOST": "${DB_HOST}",
+      "DB_PORT": "${DB_PORT}"
+    },
+    "type": "stdio"
+  },
+  "analytics-tools": {
+    "command": "${CLAUDE_PLUGIN_ROOT}/servers/analytics-server.py",
+    "args": ["--endpoint", "${ANALYTICS_API_URL}"],
+    "env": {
+      "API_KEY": "${ANALYTICS_API_KEY}"
+    },
+    "type": "http"
+  }
+}

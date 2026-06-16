@@ -54,6 +54,7 @@ from core.constants import (
     REQUEST_TIMEOUT, OPENAI_API_KEY,
 )
 from core.database import SessionLocal, ApiToken
+from core.cloudflare_access import CloudflareAccessError, CloudflareAccessVerifier, display_name_from_email
 from core.middleware import SecurityHeadersMiddleware
 from core.auth import AuthManager
 from core.exceptions import (
@@ -84,7 +85,11 @@ app = FastAPI(
 )
 
 # ========= CORS =========
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",")
+# In production, ALLOWED_ORIGINS must be explicitly set. Empty default fails closed.
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "").split(",")
+if not allowed_origins or allowed_origins == [""]:
+    logger.warning("ALLOWED_ORIGINS not configured - CORS will be disabled. Set ALLOWED_ORIGINS env var in production.")
+    allowed_origins = []  # Disables CORS entirely (fail-closed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -126,6 +131,8 @@ _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/model/probe",     # SSE; iterates models with up to 8s timeout each
     "/api/model-endpoints", # /probe sub-route also iterates models
     "/api/cookbook/setup",  # remote pacman/apt installs
+    "/api/agentcore/openai/v1/chat/completions", # private AgentCore task stream bridge
+    "/api/agentcore/tasks", # private AgentCore task streams
     "/api/upload",          # large files
     "/api/image",           # diffusion proxies (inpaint/harmonize/upscale/etc.) — own 120s httpx timeout
 )
@@ -152,12 +159,38 @@ from routes.auth_routes import setup_auth_routes, SESSION_COOKIE
 
 auth_manager = AuthManager()
 app.state.auth_manager = auth_manager
+ODYSSEUS_AUTH_MODE = os.getenv("ODYSSEUS_AUTH_MODE", "local").strip().lower()
+if ODYSSEUS_AUTH_MODE not in {"local", "cloudflare_access"}:
+    raise RuntimeError(f"Unsupported ODYSSEUS_AUTH_MODE={ODYSSEUS_AUTH_MODE!r}")
+app.state.odysseus_auth_mode = ODYSSEUS_AUTH_MODE
+cloudflare_access_verifier = (
+    CloudflareAccessVerifier.from_env()
+    if ODYSSEUS_AUTH_MODE == "cloudflare_access"
+    else None
+)
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() != "false"
 LOCALHOST_BYPASS = os.getenv("LOCALHOST_BYPASS", "false").lower() == "true"
 if LOCALHOST_BYPASS:
     logger.warning("LOCALHOST_BYPASS is enabled, loopback requests bypass authentication. Do not expose this instance to a network.")
+if ODYSSEUS_AUTH_MODE == "cloudflare_access":
+    AUTH_ENABLED = True
+    LOCALHOST_BYPASS = False
+    if not cloudflare_access_verifier or not cloudflare_access_verifier.has_configuration:
+        raise RuntimeError(
+            "ODYSSEUS_AUTH_MODE=cloudflare_access requires CLOUDFLARE_ACCESS_AUD "
+            "and CLOUDFLARE_ACCESS_ISSUER or CLOUDFLARE_ACCESS_TEAM_DOMAIN."
+        )
+    logger.info(
+        "Cloudflare Access auth enabled for issuer %s (JWKS %s)",
+        cloudflare_access_verifier.issuer,
+        cloudflare_access_verifier.jwks_url,
+    )
 
 if AUTH_ENABLED:
+    CLOUDFLARE_EXEMPT_EXACT = {
+        "/api/health",
+        "/api/version",
+    }
     AUTH_EXEMPT_EXACT = {
         "/api/auth/setup",
         "/api/auth/signup",
@@ -253,26 +286,62 @@ if AUTH_ENABLED:
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             path = request.url.path
+            if ODYSSEUS_AUTH_MODE == "cloudflare_access":
+                if path in CLOUDFLARE_EXEMPT_EXACT:
+                    return await call_next(request)
+                if path.startswith("/api/agentcore/openai/") and _is_trusted_loopback(request):
+                    user = (request.headers.get("x-circit-user") or "").strip().lower()
+                    allowed_domain = os.getenv("ODYSSEUS_ALLOWED_EMAIL_DOMAIN", "circit.io").strip().lower()
+                    if not user or (allowed_domain and not user.endswith(f"@{allowed_domain}")):
+                        user = os.getenv("AGENTCORE_ADAPTER_OWNER", "agentcore-adapter@circit.io").strip().lower()
+                    request.state.current_user = user
+                    request.state.cloudflare_access_user = user
+                    request.state.cloudflare_access_sub = user
+                    request.state.cloudflare_access_display_name = display_name_from_email(user)
+                    request.state.api_token = False
+                    request.state.auth_mode = "cloudflare_access"
+                    return await call_next(request)
+                try:
+                    principal = cloudflare_access_verifier.verify(  # type: ignore[union-attr]
+                        request.headers.get("cf-access-jwt-assertion", "")
+                    )
+                except CloudflareAccessError:
+                    if path.startswith("/api/"):
+                        return JSONResponse(status_code=401, content={"error": "Cloudflare Access assertion required"})
+                    return JSONResponse(status_code=401, content={"error": "Cloudflare Access assertion required"})
+                request.state.current_user = principal.email
+                request.state.cloudflare_access_user = principal.email
+                request.state.cloudflare_access_sub = principal.subject
+                request.state.cloudflare_access_display_name = principal.display_name
+                request.state.cloudflare_access_avatar_url = principal.avatar_url
+                request.state.api_token = False
+                request.state.auth_mode = "cloudflare_access"
+                return await call_next(request)
+
             if _is_auth_exempt(path):
                 return await call_next(request)
             # In-process internal-tool token bypass. Used by the agent
             # tool layer when it HTTP-loopbacks to admin-gated routes
             # (no admin cookie available in that context). Restricted to
             # loopback clients + matching token to keep it locked down.
+            #
+            # SECURITY (plan v3.3 §1.1): the X-Odysseus-Owner impersonation
+            # branch is REMOVED. Combined with require_admin honoring this same
+            # loopback token, it was a one-request, no-auth path to impersonate
+            # any user, pass admin, and register a stdio MCP server = arbitrary
+            # host RCE with full os.environ. The loopback bypass now ONLY ever
+            # resolves to the non-privileged "internal-tool" pseudo-user; it can
+            # never attribute the request to an arbitrary owner. (Full removal of
+            # the INTERNAL_TOOL_TOKEN mechanism itself is P3.5; this kills the
+            # impersonation now, ahead of it.)
             try:
                 from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN as _ITT
                 _hdr = request.headers.get(INTERNAL_TOOL_HEADER)
                 if _hdr and secrets.compare_digest(_hdr, _ITT) and _is_trusted_loopback(request):
-                    # Impersonation: when the agent's loopback call sets
-                    # X-Odysseus-Owner, attribute the request to that user only
-                    # if they exist. Authorization checks remain separate; this
-                    # is just owner attribution for notes/calendar/etc.
-                    _impersonate = (request.headers.get("X-Odysseus-Owner") or "").strip()
-                    _auth_mgr = getattr(request.app.state, "auth_manager", None) or auth_manager
-                    if _impersonate and _impersonate in getattr(_auth_mgr, "users", {}):
-                        request.state.current_user = _impersonate
-                    else:
-                        request.state.current_user = "internal-tool"
+                    # No impersonation. The loopback tool caller is always the
+                    # non-privileged internal-tool principal, regardless of any
+                    # X-Odysseus-Owner header it sends.
+                    request.state.current_user = "internal-tool"
                     request.state.api_token = False
                     return await call_next(request)
             except Exception:
@@ -674,6 +743,9 @@ app.include_router(setup_backup_routes(memory_manager, preset_manager, skills_ma
 from routes.font_routes import setup_font_routes
 app.include_router(setup_font_routes())
 
+from routes.agentcore_routes import setup_agentcore_routes
+app.include_router(setup_agentcore_routes())
+
 
 # MCP (Model Context Protocol)
 from src.mcp_manager import McpManager
@@ -743,6 +815,20 @@ def _serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
         html = f.read()
     nonce = getattr(request.state, "csp_nonce", "")
     html = html.replace("{{CSP_NONCE}}", nonce)
+    if file_path.endswith("index.html"):
+        if getattr(request.app.state, "odysseus_auth_mode", "local") == "cloudflare_access":
+            html = html.replace('  <link rel="manifest" href="/static/manifest.json">\n', "")
+        cache_version = os.getenv("STATIC_CACHE_VERSION", "").strip()
+        if not cache_version:
+            try:
+                cache_version = str(int(os.path.getmtime(abs_join(STATIC_DIR, "app.js"))))
+            except OSError:
+                cache_version = "1"
+        app_src = f"/static/app.js?v={cache_version}"
+        style_src = f"/static/style.css?v={cache_version}"
+        html = html.replace('href="/static/app.js"', f'href="{app_src}"')
+        html = html.replace('src="/static/app.js"', f'src="{app_src}"')
+        html = html.replace('href="/static/style.css"', f'href="{style_src}"')
     return HTMLResponse(html)
 
 @app.get("/")
@@ -802,6 +888,8 @@ async def serve_backgrounds(request: Request):
 
 @app.get("/login")
 async def serve_login(request: Request):
+    if getattr(request.app.state, "odysseus_auth_mode", "local") == "cloudflare_access":
+        return RedirectResponse(url="/", status_code=302)
     return _serve_html_with_nonce(request, abs_join(BASE_DIR, "static/login.html"))
 
 @app.get("/api/version")
@@ -892,11 +980,17 @@ async def _startup_event():
         _startup_tasks.append(start_bg_monitor())
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
+    try:
+        from src.agentcore_model_seed import seed_agentcore_model_endpoint
+        await asyncio.to_thread(seed_agentcore_model_endpoint)
+    except BaseException as e:
+        logger.warning(f"AgentCore model endpoint seed failed (non-critical): {type(e).__name__}: {e}")
     # MCP servers can be slow or blocked by local tooling. Connect them after
     # the web server is accepting traffic instead of delaying the whole UI.
     async def _startup_mcp_connections():
         try:
-            from src.builtin_mcp import register_builtin_servers
+            from src.builtin_mcp import register_builtin_servers, seed_curated_remote_mcp_servers
+            await asyncio.to_thread(seed_curated_remote_mcp_servers)
             await register_builtin_servers(mcp_manager)
         except BaseException as e:
             logger.warning(f"Built-in MCP registration failed (non-critical): {type(e).__name__}: {e}")

@@ -1,0 +1,79 @@
+# Odysseus tailnet reverse proxy.
+# - Binds only tailnet IP + loopback (no LAN exposure).
+# - TLS via tailscale cert (real cert from Tailscale's LE).
+# - Hard-blocks shell exec + webhook trigger routes at edge.
+# - Forwards X-Forwarded-* so Odysseus disables loopback bypass.
+
+{
+	admin off
+	auto_https off
+	persist_config off
+	storage file_system {
+		root /Users/jakubsikora/Repos/personal/odysseus/deploy/caddy_data
+	}
+}
+
+:4444 {
+	bind 127.0.0.1
+
+	log {
+		output file /Users/jakubsikora/Repos/personal/odysseus/deploy/sikorasy-redirect.log
+		format console
+	}
+
+	redir https://odysseus.tail5d39b4.ts.net{uri} 301
+}
+
+# Shared security + proxy rules for the app vhosts. Imported by both the
+# canonical node name and the friendly `odysseus` name.
+(odysseus_app) {
+	log {
+		output file /Users/jakubsikora/Repos/personal/odysseus/deploy/caddy.log
+		format console
+	}
+
+	# Defense-in-depth: regex matcher tolerates leading slashes,
+	# %2f, trailing semicolons. Server-side env also disables shell.
+	@blocked path_regexp blocked ^/+api/+(shell(/|$)|tasks/+[^/]+/+webhook(/|$))
+	handle @blocked {
+		respond "blocked at edge" 403
+	}
+
+	# Block path-encoded variants.
+	@encoded_blocked path_regexp encoded ^(?i)/+api(/|%2f)+(shell|tasks)
+	@encoded_shell path_regexp encshell %2[fF]shell|%2[fF]webhook
+	handle @encoded_shell {
+		respond "blocked at edge" 403
+	}
+
+	# Security headers.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:7860 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-Host {host}
+		header_up Host {host}
+	}
+}
+
+# Canonical node name.
+https://mac-studio-jakub.tail5d39b4.ts.net:8443 {
+	bind 100.116.31.6 127.0.0.1
+	tls /Users/jakubsikora/Repos/personal/odysseus/deploy/mac-studio-jakub.tail5d39b4.ts.net.crt /Users/jakubsikora/Repos/personal/odysseus/deploy/mac-studio-jakub.tail5d39b4.ts.net.key
+	import odysseus_app
+}
+
+# Friendly `odysseus` name (own tailscale cert). The tailnet DNS record for
+# odysseus.tail5d39b4.ts.net must point at this node's IP (100.116.31.6) in the
+# Tailscale admin console for the bare URL to resolve here.
+https://odysseus.tail5d39b4.ts.net:8443 {
+	bind 100.116.31.6 127.0.0.1
+	tls /Users/jakubsikora/Repos/personal/odysseus/deploy/odysseus.tail5d39b4.ts.net.crt /Users/jakubsikora/Repos/personal/odysseus/deploy/odysseus.tail5d39b4.ts.net.key
+	import odysseus_app
+}

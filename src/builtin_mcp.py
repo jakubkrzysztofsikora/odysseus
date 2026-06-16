@@ -10,7 +10,10 @@ import os
 import shutil
 import sys
 import asyncio
+import json
+from pathlib import Path
 
+from core.constants import DATA_DIR
 from core.platform_compat import IS_WINDOWS, which_tool
 
 logger = logging.getLogger(__name__)
@@ -84,6 +87,188 @@ _BUILTIN_NPX_SERVERS = {
 
 # Global flag to disable MCP if there are compatibility issues
 MCP_DISABLED = os.environ.get("ODYSSEUS_DISABLE_MCP", "").lower() in ("1", "true", "yes")
+
+
+def _mcp_oauth_token_file(server_id: str) -> str:
+    return str((Path(DATA_DIR) / "mcp_oauth" / f"{server_id}.json").resolve(strict=False))
+
+
+DEFAULT_CIRCIT_TENANT_ID = "b6560c52-065a-424b-90b1-5340eab75de9"
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value.strip()
+    return default
+
+
+def _remote_oauth_config(
+    server_id: str,
+    *,
+    client_name: str = "Circitron",
+    client_id: str = "",
+    client_secret: str = "",
+    token_endpoint_auth_method: str = "",
+) -> dict:
+    public_url = (
+        os.environ.get("APP_PUBLIC_URL")
+        or os.environ.get("OAUTH_REDIRECT_BASE_URL")
+        or "http://localhost:7000"
+    ).rstrip("/")
+    cfg = {
+        "provider": "mcp",
+        "client_name": client_name,
+        "token_file": _mcp_oauth_token_file(server_id),
+        "redirect_uris": [f"{public_url}/api/mcp/oauth/callback"],
+    }
+    if client_id:
+        cfg["client_id"] = client_id
+        cfg["token_endpoint_auth_method"] = token_endpoint_auth_method or (
+            "client_secret_post" if client_secret else "none"
+        )
+    if client_secret:
+        cfg["client_secret"] = client_secret
+    return cfg
+
+
+def _workiq_oauth_config(server_id: str) -> dict:
+    return _remote_oauth_config(
+        server_id,
+        client_id=_first_env(
+            "WORKIQ_MCP_CLIENT_ID",
+            "M365_MCP_CLIENT_ID",
+            "MICROSOFT_365_MCP_CLIENT_ID",
+            "MICROSOFT_MCP_CLIENT_ID",
+        ),
+        client_secret=_first_env(
+            "WORKIQ_MCP_CLIENT_SECRET",
+            "M365_MCP_CLIENT_SECRET",
+            "MICROSOFT_365_MCP_CLIENT_SECRET",
+            "MICROSOFT_MCP_CLIENT_SECRET",
+        ),
+        token_endpoint_auth_method=_first_env(
+            "WORKIQ_MCP_TOKEN_ENDPOINT_AUTH_METHOD",
+            "M365_MCP_TOKEN_ENDPOINT_AUTH_METHOD",
+        ),
+    )
+
+
+def _workiq_url(server_name: str) -> str:
+    tenant_id = _first_env(
+        "WORKIQ_MCP_TENANT_ID",
+        "MICROSOFT_TENANT_ID",
+        "AZURE_TENANT_ID",
+        "ENTRA_TENANT_ID",
+        "CIRCIT_TENANT_ID",
+        default=DEFAULT_CIRCIT_TENANT_ID,
+    )
+    base_url = _first_env(
+        "WORKIQ_MCP_BASE_URL",
+        default="https://agent365.svc.cloud.microsoft/agents",
+    ).rstrip("/")
+    return f"{base_url}/tenants/{tenant_id}/servers/{server_name}"
+
+
+def _curated_remote_mcp_servers() -> dict:
+    exchange_url = (
+        os.environ.get("M365_EXCHANGE_MCP_URL")
+        or os.environ.get("MICROSOFT_365_EXCHANGE_MCP_URL")
+        or ""
+    ).strip()
+    exchange_url = exchange_url or "https://mcp.svc.cloud.microsoft/enterprise"
+    servers = {
+        "circit_sentry": {
+            "name": "Sentry",
+            "url": "https://mcp.sentry.dev/mcp",
+            "enabled": True,
+        },
+        "circit_atlassian": {
+            "name": "Atlassian",
+            "url": "https://mcp.atlassian.com/v1/mcp/authv2",
+            "enabled": True,
+        },
+        "circit_slack": {
+            "name": "Slack",
+            "url": "https://circitron-app.nicestone-ab7e633c.northeurope.azurecontainerapps.io/api/mcp",
+            "enabled": True,
+        },
+        "circit_microsoft_graph": {
+            "name": "Microsoft Graph",
+            "url": "https://mcp.svc.cloud.microsoft/enterprise",
+            "enabled": True,
+            "oauth_config": _workiq_oauth_config("circit_microsoft_graph"),
+        },
+        "circit_workiq_mail": {
+            "name": "Microsoft 365 Exchange Mail",
+            "url": _workiq_url("mcp_MailTools"),
+            "enabled": True,
+            "oauth_config": _workiq_oauth_config("circit_workiq_mail"),
+        },
+        "circit_workiq_calendar": {
+            "name": "Microsoft 365 Exchange Calendar",
+            "url": _workiq_url("mcp_CalendarTools"),
+            "enabled": True,
+            "oauth_config": _workiq_oauth_config("circit_workiq_calendar"),
+        },
+        "circit_m365_exchange": {
+            "name": "Microsoft 365 Exchange",
+            "url": exchange_url,
+            "enabled": True,
+            "oauth_config": _workiq_oauth_config("circit_m365_exchange"),
+        },
+    }
+    return servers
+
+
+def seed_curated_remote_mcp_servers() -> None:
+    """Seed Circit-wide remote MCP entries into the shared MCP catalog.
+
+    These rows are global, so every user sees the same curated integrations and
+    completes per-user OAuth where the remote server requires it.
+    """
+    if MCP_DISABLED:
+        return
+    from core.database import McpServer, SessionLocal
+
+    db = SessionLocal()
+    try:
+        for server_id, cfg in _curated_remote_mcp_servers().items():
+            existing = db.query(McpServer).filter(McpServer.id == server_id).first()
+            oauth_config = (
+                json.dumps(cfg.get("oauth_config") or _remote_oauth_config(server_id))
+                if cfg["enabled"]
+                else None
+            )
+            if existing:
+                was_placeholder = str(existing.url or "").endswith(".invalid/mcp")
+                existing.name = cfg["name"]
+                existing.transport = "streamable_http"
+                existing.command = None
+                existing.args = "[]"
+                existing.env = "{}"
+                existing.url = cfg["url"]
+                existing.oauth_config = oauth_config
+                if not cfg["enabled"]:
+                    existing.is_enabled = False
+                elif was_placeholder:
+                    existing.is_enabled = True
+                continue
+            db.add(McpServer(
+                id=server_id,
+                name=cfg["name"],
+                transport="streamable_http",
+                command=None,
+                args="[]",
+                env="{}",
+                url=cfg["url"],
+                is_enabled=bool(cfg["enabled"]),
+                oauth_config=oauth_config,
+            ))
+        db.commit()
+    finally:
+        db.close()
 
 
 async def register_builtin_servers(mcp_manager):
@@ -203,10 +388,15 @@ async def _is_npx_package_cached(npx_path, package_spec, timeout_s=5):
     network error) means we should skip the server.
     """
     try:
+        # P6.2: strip the ambient env so provider keys / auth tokens never reach
+        # the npx child. clean_subprocess_env() passes only the safe allowlist
+        # (PATH/HOME/locale) needed for npx to resolve and run.
+        from src.subprocess_safe import clean_subprocess_env
         proc = await asyncio.create_subprocess_exec(
             npx_path, "--no-install", package_spec, "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=clean_subprocess_env(),
         )
     except (OSError, ValueError):
         return False

@@ -3,7 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual">
-<title>Odysseus — Login</title>
+<title>Circit AI — Login</title>
+<link rel="icon" type="image/jpeg" href="/static/vendor/circit-ds/circit-favicon.jpg">
+<link rel="apple-touch-icon" href="/static/vendor/circit-ds/circit-favicon.jpg">
+<link rel="stylesheet" href="/static/vendor/circit-ds/circit-tokens.css">
 <script nonce="{{CSP_NONCE}}">
 (function(){
   // Per-theme bg-effect defaults — mirrors THEME_DEFAULT_* maps in
@@ -41,6 +44,10 @@
         aiBubbleBg:      '--ai-bubble-bg',
         bubbleBorder:    '--bubble-border',
         sidebarBg:       '--sidebar-bg',
+        sidebarFg:       '--sidebar-fg',
+        sidebarMuted:    '--sidebar-muted',
+        sidebarHoverBg:  '--sidebar-hover-bg',
+        sidebarActiveBg: '--sidebar-active-bg',
         brandColor:      '--brand-color',
         hamburgerColor:  '--hamburger-color',
         inputBg:         '--input-bg',
@@ -89,8 +96,9 @@
      localStorage — renders the login page in the same palette as the rest
      of the app instead of a different greys+offwhite scheme. */
   :root {
-    --bg: #282c34; --fg: #9cdef2; --panel: #111; --border: #355a66;
-    --red: #e06c75; --green: #50fa7b;
+    --bg: #fcf9f5; --fg: #0a0610; --panel: #ffffff; --border: #efefef;
+    --red: #61409b; --green: #2ea478;
+    --font-family: var(--c-font-primary, "Basis Grotesque Pro", "Inter", system-ui, -apple-system, sans-serif);
     --bg-effect-intensity: 1;
   }
   /* Background patterns — mirrors static/style.css "Background Patterns"
@@ -112,7 +120,7 @@
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: 'Fira Code', monospace;
+    font-family: var(--font-family);
     background: var(--bg); color: var(--fg);
     display: flex; justify-content: center; align-items: flex-start;
     min-height: 100vh; min-height: 100dvh;
@@ -129,12 +137,16 @@
   }
   .logo {
     text-align: center; margin-bottom: 1.5rem;
+    display: flex; align-items: center; justify-content: center; gap: 0.55rem;
+  }
+  .logo-wordmark {
+    width: 9.6rem; height: auto; display: block;
   }
   .logo span {
-    font-family: 'Fira Code', monospace;
+    font-family: var(--font-family);
     font-size: 2rem; font-weight: 600;
     letter-spacing: 0.04em;
-    /* Same gradient as the main app's welcome-screen "Odysseus" title
+    /* Same gradient as the main app's welcome-screen "Circit AI" title
        (static/style.css #welcome-screen .welcome-name) so the brand
        wordmark is consistent across login + first-launch screens. */
     background: linear-gradient(135deg, var(--brand-color, var(--red)), color-mix(in srgb, var(--brand-color, var(--red)) 60%, var(--fg)));
@@ -147,7 +159,7 @@
   input:not(.remember-check) {
     width: 100%; padding: 0.6rem 0.8rem; margin-bottom: 1rem;
     background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-    color: var(--fg); font-size: 0.95rem; font-family: 'Fira Code', monospace;
+    color: var(--fg); font-size: 0.95rem; font-family: var(--font-family);
   }
   input:focus { outline: none; border-color: var(--red); }
   /* On touch devices keep inputs at >=16px so iOS Safari doesn't zoom the whole
@@ -172,7 +184,7 @@
     /* Darken the brand red slightly so #fff label text clears the WCAG AA
        4.5:1 contrast threshold (plain --red #e06c75 only reaches ~3.2:1). */
     background: color-mix(in srgb, var(--red) 78%, #000); color: #fff; font-size: 1rem; cursor: pointer;
-    font-weight: 600; font-family: 'Fira Code', monospace;
+    font-weight: 600; font-family: var(--font-family);
   }
   button:hover { background: color-mix(in srgb, var(--red) 66%, black); }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -225,11 +237,10 @@
   .remember-toggle:hover .remember-dot {
     border-color: color-mix(in srgb, var(--fg) 40%, transparent);
   }
-  .logo-boat { width: 1.6rem; height: 1.6rem; margin-right: 0.4rem; vertical-align: -0.15em; color: var(--red); }
   .version-label {
     position: fixed; bottom: 12px; right: 16px;
     font-size: 0.7rem; opacity: 0.25;
-    font-family: 'Fira Code', monospace;
+    font-family: var(--font-family);
     pointer-events: none; user-select: none;
   }
   /* Whirlpool-style spinner shown in the submit button while login /
@@ -250,7 +261,7 @@
 <body>
 <main class="card">
   <h1 class="logo">
-    <svg class="logo-boat" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg><span>Odysseus</span>
+    <img class="logo-wordmark" src="/static/vendor/circit-ds/circit-wordmark.svg" alt="Circit"><span>AI</span>
   </h1>
   <p class="setup-note" id="setupNote" style="display:none"></p>
 

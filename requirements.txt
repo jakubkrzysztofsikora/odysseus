@@ -36,6 +36,7 @@ python-dateutil
 # the protocol without it.
 caldav
 cryptography
+PyJWT[crypto]>=2.8
 bcrypt
 mcp
 pyotp

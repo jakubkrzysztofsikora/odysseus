@@ -117,6 +117,30 @@ def classify_tool_intent(text: str) -> ToolIntent:
     return ToolIntent(False, reason="no tool-action pattern matched")
 
 
+_PLAIN_CHAT_RE = re.compile(
+    r"^\s*(?:"
+    r"hi|hello|hey|hiya|yo|"
+    r"hi\s+there|hello\s+there|hey\s+there|"
+    r"good\s+(?:morning|afternoon|evening)|"
+    r"how\s+are\s+you|what'?s\s+up|"
+    r"thanks?|thank\s+you|ty|"
+    r"ok(?:ay)?|cool|great|nice|perfecto"
+    r")\s*[.!?,-]*\s*$",
+    re.I,
+)
+
+
+def is_plain_chat_turn(text: str) -> bool:
+    """True for short conversational turns that must never trigger tools."""
+    if not text:
+        return False
+    if len(text.strip()) > 80:
+        return False
+    if classify_tool_intent(text).needs_tools:
+        return False
+    return bool(_PLAIN_CHAT_RE.match(text))
+
+
 def message_needs_tools(text: str, patterns: Iterable[Pattern[str]] = _TOOL_INTENT_PATTERNS) -> bool:
     """Return True when a plain chat message should be promoted to agent mode."""
     if not text:

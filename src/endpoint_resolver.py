@@ -89,9 +89,11 @@ def _resolve_tailscale_host(hostname: str) -> Optional[str]:
 
     # DNS failed — try tailscale
     try:
+        from subprocess_safe import clean_subprocess_env
         result = subprocess.run(
             ["tailscale", "status", "--json"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            env=clean_subprocess_env(),
         )
         if result.returncode == 0:
             import json as _json
@@ -136,6 +138,8 @@ def normalize_base(url: str) -> str:
     for suffix in ["/models", "/chat/completions", "/completions", "/v1/messages"]:
         if url.endswith(suffix):
             url = url[: -len(suffix)].rstrip("/")
+    if is_agentcore_openai_base(url) and url.endswith("/chat"):
+        url = url[: -len("/chat")].rstrip("/")
     for suffix in ["/chat", "/tags", "/generate"]:
         if url.endswith("/api" + suffix):
             url = url[: -len(suffix)].rstrip("/")
@@ -166,6 +170,8 @@ def _ollama_api_root(base: str) -> str:
 def build_chat_url(base: str) -> str:
     """Return the correct chat endpoint URL for a given base."""
     base = resolve_url(base)
+    if is_agentcore_openai_base(base):
+        return normalize_base(base) + "/chat/completions"
     provider = _detect_provider(base)
     if provider == "anthropic":
         return _anthropic_api_root(base) + "/v1/messages"
@@ -185,7 +191,16 @@ def build_models_url(base: str) -> str:
     return base + "/models"
 
 
-def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
+def is_agentcore_openai_base(base: str) -> bool:
+    """True for the in-app OpenAI-compatible adapter over Circit AgentCore."""
+    try:
+        parsed = urlparse(base or "")
+    except Exception:
+        return False
+    return (parsed.path or "").rstrip("/").startswith("/api/agentcore/openai")
+
+
+def build_headers(api_key: Optional[str], base: str, owner: Optional[str] = None) -> Dict[str, str]:
     """Build auth headers for an endpoint."""
     provider = _detect_provider(base)
     headers: Dict[str, str] = {}
@@ -202,6 +217,8 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
     if provider == "openrouter":
         headers.setdefault("HTTP-Referer", "https://github.com/pewdiepie-archdaemon/odysseus")
         headers.setdefault("X-OpenRouter-Title", "Odysseus")
+    if owner and is_agentcore_openai_base(base):
+        headers["X-Circit-User"] = str(owner).strip().lower()
     return headers
 
 
@@ -277,7 +294,7 @@ def resolve_endpoint(
 
         base = normalize_base(ep.base_url)
         chat_url = build_chat_url(base)
-        headers = build_headers(ep.api_key, base)
+        headers = build_headers(ep.api_key, base, owner=owner)
 
         # Discard a configured model the user has since disabled on the
         # endpoint (e.g. a stale `default_model` left pointing at a now-hidden
@@ -323,7 +340,7 @@ def resolve_endpoint_by_id(
             return None
         base = normalize_base(ep.base_url)
         chat_url = build_chat_url(base)
-        headers = build_headers(ep.api_key, base)
+        headers = build_headers(ep.api_key, base, owner=owner)
         m = (model or "").strip()
         # Drop a model the user disabled on the endpoint, then pick the first
         # enabled chat model rather than a hidden one.

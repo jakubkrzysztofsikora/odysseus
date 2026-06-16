@@ -419,7 +419,8 @@ const DSML_TOOL_RE = /<\s*[｜|]+\s*DSML\s*[｜|]+\s*tool_calls\s*>[\s\S]*?(?:<\
 const DSML_STRAY_RE = /<\s*\/?\s*[｜|]+\s*DSML\s*[｜|]+[^>]*>/gi;
 // Raw provider-native function calls that leaked as content, e.g.
 // mcp__0ac61a6b__search\Eloquent{"query":"..."}
-const RAW_FUNCTION_CALL_RE = /(^|\s)(?:mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+|web_search|web_fetch|bash|python|read_file|write_file|create_document|edit_document|update_document|suggest_document)\s*(?:\\?[A-Za-z][A-Za-z0-9_.-]*)?\s*\{[^\n]*\}/g;
+const RAW_FUNCTION_CALL_RE = /(^|\s)(?:mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+|[A-Za-z][A-Za-z0-9_.-]*(?:-[A-Za-z0-9_.-]+)+|web_search|web_fetch|bash|python|read_file|write_file|create_document|edit_document|update_document|suggest_document)\s*(?:\\?[A-Za-z][A-Za-z0-9_.-]*)?\s*\{[^\n]*\}/g;
+const RAW_JSON_TOOL_CALL_RE = /^\s*\{[\s\S]*?"name"\s*:\s*"[^"]+"[\s\S]*?"arguments"\s*:\s*\{[\s\S]*\}[\s\S]*\}\s*$/;
 // Self-narration about tool results (model echoing stdout/exit_code)
 const TOOL_NARRATION_RE = /(?:The (?:result|output) shows?:?\s*)?-?\s*(?:stdout|stderr|exit_code):\s*.+/gi;
 
@@ -797,6 +798,7 @@ export function roleTimestamp(when) {
  */
 export function stripToolBlocks(text) {
   let cleaned = text.replace(TOOL_CALL_RE, '');
+  cleaned = cleaned.replace(RAW_JSON_TOOL_CALL_RE, '');
   cleaned = cleaned.replace(EXEC_FENCE_RE, '');
   cleaned = cleaned.replace(DSML_TOOL_RE, '');
   cleaned = cleaned.replace(DSML_STRAY_RE, '');
@@ -1800,7 +1802,7 @@ export function displayMetrics(messageElement, metrics) {
           compactMsg.className = 'msg msg-ai';
           const compactRole = document.createElement('div');
           compactRole.className = 'role';
-          compactRole.textContent = 'Odysseus';
+          compactRole.textContent = 'Circitron';
           const compactBody = document.createElement('div');
           compactBody.className = 'body';
           compactBody.innerHTML = 'Compacting context <span class="compact-wave">▁▂▃▅▂▁</span>';
@@ -2057,7 +2059,7 @@ export function addMessage(role, content, modelName, metadata) {
     const isSlash = metadata?.source === 'slash';
     const isCompacted = metadata?.compacted;
     const resolvedModel = modelName || metadata?.model;
-    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? 'Odysseus' : shortModel(resolvedModel);
+    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? 'Circitron' : shortModel(resolvedModel);
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';
     }

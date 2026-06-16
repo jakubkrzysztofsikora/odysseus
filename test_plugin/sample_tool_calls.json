@@ -1,0 +1,32 @@
+[
+  {
+    "event": "PreToolUse",
+    "tool_name": "bash",
+    "tool_input": "ls -la /tmp",
+    "context": {
+      "session_id": "session_123",
+      "user_id": "user_456",
+      "project_path": "/home/user/projects/myapp"
+    }
+  },
+  {
+    "event": "PreToolUse",
+    "tool_name": "bash",
+    "tool_input": "rm -rf /",
+    "context": {
+      "session_id": "session_123",
+      "user_id": "user_456",
+      "project_path": "/home/user/projects/myapp"
+    }
+  },
+  {
+    "event": "PostToolUse",
+    "tool_name": "bash",
+    "tool_input": "git status",
+    "tool_result": "On branch main\nYour branch is up to date with 'origin/main'.\nnothing to commit, working tree clean",
+    "context": {
+      "session_id": "session_123",
+      "execution_time": 0.5
+    }
+  }
+]

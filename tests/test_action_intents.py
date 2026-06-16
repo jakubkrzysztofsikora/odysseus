@@ -1,4 +1,4 @@
-from src.action_intents import classify_tool_intent, message_needs_tools
+from src.action_intents import classify_tool_intent, is_plain_chat_turn, message_needs_tools
 
 
 def test_calendar_entry_request_promotes_to_agent():
@@ -48,6 +48,14 @@ def test_explanatory_calendar_questions_stay_plain_chat():
     intent = classify_tool_intent("How do I add an entry to my calendar?")
     assert not intent.needs_tools
     assert intent.reason == "explanatory feature question"
+
+
+def test_plain_greetings_never_need_tools():
+    assert is_plain_chat_turn("hi")
+    assert is_plain_chat_turn("hello there")
+    assert is_plain_chat_turn("perfecto")
+    assert not message_needs_tools("hi")
+    assert not is_plain_chat_turn("hi, open my calendar")
 
 
 def test_router_reports_non_calendar_categories():

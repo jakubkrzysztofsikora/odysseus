@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import secrets
+import time
 import uuid
 import urllib.parse
 import html
@@ -27,6 +28,7 @@ MCP_OAUTH_DEFAULT_REDIRECT = os.getenv(
 )
 _PENDING_MCP_OAUTH: dict[str, dict] = {}
 _MCP_OAUTH_STATE_TO_FLOW: dict[str, str] = {}
+_MCP_OAUTH_FLOW_TTL_SECONDS = 15 * 60
 
 
 def _json_or(value: str | None, default):
@@ -67,7 +69,7 @@ def _oauth_token_needs_authorization(oauth_cfg: dict | None) -> bool:
 def _default_remote_mcp_oauth_config(server_id: str) -> dict:
     return {
         "provider": "mcp",
-        "client_name": "Odysseus",
+        "client_name": "Circitron",
         "token_file": f"~/.odysseus/mcp-oauth/{server_id}.json",
         "redirect_uris": [MCP_OAUTH_DEFAULT_REDIRECT],
     }
@@ -239,9 +241,12 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 oauth_cfg = json.loads(srv.oauth_config) if srv.oauth_config else None
                 is_interactive_remote = _is_interactive_mcp_remote(srv, args)
                 needs_oauth = (
-                    status.get("status") == "needs_oauth"
-                    or _oauth_token_needs_authorization(oauth_cfg)
-                    or (is_interactive_remote and status.get("status") != "connected")
+                    bool(srv.is_enabled)
+                    and (
+                        status.get("status") == "needs_oauth"
+                        or _oauth_token_needs_authorization(oauth_cfg)
+                        or (is_interactive_remote and status.get("status") != "connected")
+                    )
                 )
                 disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
                 total_tools = status.get("tool_count", 0)
@@ -596,6 +601,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
             srv = db.query(McpServer).filter(McpServer.id == server_id).first()
             if not srv:
                 raise HTTPException(404, "Server not found")
+            if not srv.is_enabled:
+                raise HTTPException(400, "Server is disabled; enable or configure it before authorizing")
             args, _env, _oauth = _server_runtime_config(srv)
             remote_url = _mcp_remote_url(args)
             if _is_interactive_mcp_remote(srv, args) and remote_url:
@@ -664,6 +671,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
         flow_id = secrets.token_urlsafe(18)
         flow = {
             "server_id": srv.id,
+            "server_name": srv.name,
+            "created_at": time.time(),
             "auth_url": loop.create_future(),
             "callback": loop.create_future(),
             "result": loop.create_future(),
@@ -708,7 +717,10 @@ def setup_mcp_routes(mcp_manager: McpManager):
         asyncio.create_task(run_connect())
 
         try:
-            auth_url = await asyncio.wait_for(flow["auth_url"], timeout=30)
+            auth_url = await asyncio.wait_for(
+                asyncio.shield(flow["auth_url"]),
+                timeout=float(os.getenv("MCP_OAUTH_INITIAL_WAIT_SECONDS", "4")),
+            )
         except asyncio.TimeoutError:
             error = "The MCP server did not provide an OAuth authorization URL. Check the server URL and transport."
             if flow["result"].done():
@@ -721,17 +733,57 @@ def setup_mcp_routes(mcp_manager: McpManager):
                         success=True,
                     ))
                 error = result.get("error") or error
-            _PENDING_MCP_OAUTH.pop(flow_id, None)
-            return HTMLResponse(
-                _oauth_result_page(
-                    "Authorization Failed",
-                    error,
-                ),
-                status_code=504,
-            )
+                return HTMLResponse(_oauth_result_page("Authorization Failed", error), status_code=400)
+            host = request.headers.get("host", "")
+            return HTMLResponse(_oauth_pending_page(flow_id, srv.name, host))
 
         host = request.headers.get("host", "")
         return HTMLResponse(_oauth_authorize_page(auth_url, srv.id, host, provider_name=srv.name))
+
+    @router.get("/oauth/wait/{flow_id}")
+    async def oauth_wait(flow_id: str, request: Request):
+        """Poll page for remote MCP OAuth discovery that outlives one request."""
+        require_admin(request)
+        flow = _PENDING_MCP_OAUTH.get(flow_id)
+        if not flow:
+            return HTMLResponse(
+                _oauth_result_page("Authorization Failed", "OAuth flow expired or was not started from Circitron."),
+                status_code=404,
+            )
+        if time.time() - float(flow.get("created_at") or 0) > _MCP_OAUTH_FLOW_TTL_SECONDS:
+            _PENDING_MCP_OAUTH.pop(flow_id, None)
+            return HTMLResponse(
+                _oauth_result_page("Authorization Failed", "OAuth flow expired. Start authorization again from Settings."),
+                status_code=408,
+            )
+        host = request.headers.get("host", "")
+        server_name = str(flow.get("server_name") or flow.get("server_id") or "MCP server")
+        if flow["auth_url"].done():
+            return HTMLResponse(
+                _oauth_authorize_page(
+                    flow["auth_url"].result(),
+                    str(flow.get("server_id") or ""),
+                    host,
+                    provider_name=server_name,
+                )
+            )
+        if flow["result"].done():
+            result = flow["result"].result()
+            _PENDING_MCP_OAUTH.pop(flow_id, None)
+            if result.get("connected"):
+                return HTMLResponse(_oauth_result_page(
+                    "Authorization Successful",
+                    f"{server_name} connected with {result.get('tool_count', 0)} tools. You can close this window.",
+                    success=True,
+                ))
+            return HTMLResponse(
+                _oauth_result_page(
+                    "Authorization Failed",
+                    result.get("error") or "The MCP server did not provide an OAuth authorization URL.",
+                ),
+                status_code=400,
+            )
+        return HTMLResponse(_oauth_pending_page(flow_id, server_name, host))
 
     @router.get("/oauth/callback")
     async def oauth_callback(code: str, state: str, request: Request):
@@ -900,7 +952,7 @@ def _oauth_authorize_page(auth_url: str, server_id: str, host: str, provider_nam
     provider_name = html.escape(provider_name, quote=True)
     return f"""<!DOCTYPE html>
 <html><head>
-<meta charset="UTF-8"><title>Authorize — Odysseus</title>
+<meta charset="UTF-8"><title>Authorize — Circitron</title>
 <style>
   body {{ font-family: 'Fira Code', monospace; background: #0f0f0f; color: #e0e0e0;
     display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
@@ -934,9 +986,8 @@ def _oauth_authorize_page(auth_url: str, server_id: str, host: str, provider_nam
   <h2>Authorize {provider_name}</h2>
   <div class="step">
     <b>1.</b> Click the button below to sign in<br>
-    <b>2.</b> After approving, your browser will show an error page — that's normal<br>
-    <b>3.</b> Copy the full URL from your browser's address bar<br>
-    <b>4.</b> Paste it below and click Connect
+    <b>2.</b> Approve the requested access<br>
+    <b>3.</b> If the provider does not return automatically, paste the final callback URL below
   </div>
   <a class="auth-link" href="{auth_url}" target="_blank" rel="noopener">Sign in</a>
   <div class="divider"></div>
@@ -945,6 +996,37 @@ def _oauth_authorize_page(auth_url: str, server_id: str, host: str, provider_nam
     <input type="text" name="callback_url" placeholder="http://localhost:7860/api/mcp/oauth/callback?code=..." required>
     <br><button type="submit">Connect</button>
   </form>
+</div></body></html>"""
+
+
+def _oauth_pending_page(flow_id: str, provider_name: str, host: str) -> str:
+    """Short-lived polling page while MCP OAuth discovery/DCR completes."""
+    flow_id = html.escape(flow_id, quote=True)
+    provider_name = html.escape(provider_name, quote=True)
+    host = html.escape(host, quote=True)
+    wait_url = f"/api/mcp/oauth/wait/{flow_id}"
+    return f"""<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8"><title>Preparing Authorization — Circitron</title>
+<meta http-equiv="refresh" content="2;url={wait_url}">
+<style>
+  body {{ font-family: 'Fira Code', monospace; background: #0f0f0f; color: #e0e0e0;
+    display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
+  .card {{ background: #1a1a1a; border: 1px solid #333; border-radius: 12px;
+    padding: 2rem; max-width: 460px; text-align: center; }}
+  h2 {{ color: #e06c75; margin-bottom: 0.5rem; font-size: 1.1rem; }}
+  p {{ color: #aaa; font-size: 0.85rem; line-height: 1.6; }}
+  a {{ color: #e06c75; text-decoration: none; font-weight: 600; }}
+  .spinner {{ width: 28px; height: 28px; border-radius: 50%; border: 2px solid #333;
+    border-top-color: #e06c75; margin: 0 auto 1rem; animation: spin 0.9s linear infinite; }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+</style></head>
+<body><div class="card">
+  <div class="spinner"></div>
+  <h2>Preparing {provider_name}</h2>
+  <p>Circitron is waiting for the provider to return its sign-in URL. This page refreshes automatically and avoids the Cloudflare timeout.</p>
+  <p><a href="{wait_url}">Check again</a></p>
+  <p style="opacity:.55;font-size:.72rem">Host: {host}</p>
 </div></body></html>"""
 
 

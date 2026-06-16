@@ -38,6 +38,12 @@ def require_admin(request: Request):
     auth_mgr = getattr(request.app.state, "auth_manager", None)
     if os.getenv("AUTH_ENABLED", "true").lower() == "false":
         return
+
+    if getattr(request.state, "auth_mode", None) == "cloudflare_access":
+        from src.cloudflare_admin import is_cloudflare_admin
+        if is_cloudflare_admin(getattr(request.state, "current_user", None)):
+            return
+
     if not auth_mgr or not auth_mgr.is_configured:
         raise HTTPException(403, "Admin only")
     user = getattr(request.state, "current_user", None)
@@ -92,7 +98,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
                 "font-src 'self' https://cdn.jsdelivr.net; "
-                "img-src 'self' data: blob:; "
+                "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
                 "connect-src 'self'; "
                 "frame-src 'self'; "

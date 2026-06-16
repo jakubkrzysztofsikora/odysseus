@@ -19,7 +19,7 @@ from src.agent_loop import stream_agent_loop
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
-from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
+from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url, is_agentcore_openai_base
 from src.prompt_security import untrusted_context_message
 from core.exceptions import SessionNotFoundError
 from src.auth_helpers import effective_user
@@ -38,7 +38,10 @@ from routes.chat_helpers import (
     clean_thinking_for_save,
     _enforce_chat_privileges,
 )
-from src.action_intents import classify_tool_intent as _classify_tool_intent
+from src.action_intents import (
+    classify_tool_intent as _classify_tool_intent,
+    is_plain_chat_turn as _is_plain_chat_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,34 @@ def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
         build_chat_url(base).rstrip("/"),
     }
     return sess in variants or sess.startswith(base + "/")
+
+
+def _canonicalize_agentcore_session_endpoint(sess, session_id: str) -> bool:
+    """Persist stale AgentCore short chat URLs as OpenAI chat-completions URLs."""
+    endpoint_url = (getattr(sess, "endpoint_url", "") or "").strip()
+    if not endpoint_url or not is_agentcore_openai_base(endpoint_url):
+        return False
+
+    canonical = build_chat_url(_normalize_base(endpoint_url)).rstrip("/")
+    if endpoint_url.rstrip("/") == canonical:
+        return False
+
+    db = SessionLocal()
+    try:
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        if db_session:
+            db_session.endpoint_url = canonical
+            db_session.updated_at = datetime.utcnow()
+            db.commit()
+        sess.endpoint_url = canonical
+        logger.info("Canonicalized AgentCore session endpoint for %s", session_id)
+        return True
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Failed to canonicalize AgentCore session endpoint for %s: %s", session_id, exc)
+        return False
+    finally:
+        db.close()
 
 
 def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
@@ -250,6 +281,15 @@ def _set_user_time_from_request(request: Request) -> None:
         pass
 
 
+def _plain_agent_local_reply(message: str) -> str:
+    text = (message or "").strip().lower()
+    if text in {"thanks", "thank you", "ty"}:
+        return "You're welcome."
+    if text in {"ok", "okay", "perfecto", "cool"}:
+        return "OK."
+    return "Hi. How can I help?"
+
+
 def setup_chat_routes(
     session_manager,
     chat_handler,
@@ -287,6 +327,7 @@ def setup_chat_routes(
         except KeyError:
             raise HTTPException(404, f"Session '{session}' not found")
         owner = effective_user(request)
+        _canonicalize_agentcore_session_endpoint(sess, session)
         if _clear_orphaned_session_endpoint(sess, owner=owner):
             raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
 
@@ -401,9 +442,15 @@ def setup_chat_routes(
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         multiagent_mode = str(form_data.get("multiagent", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
-        chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        requested_chat_mode = str(form_data.get("mode", "")).strip().lower()
+        chat_mode = requested_chat_mode  # 'chat' or 'agent'
+        plain_agent_turn = False
         if multiagent_mode:
             chat_mode = "agent"
+        if chat_mode == "agent" and not multiagent_mode and _is_plain_chat_turn(message or ""):
+            plain_agent_turn = True
+            chat_mode = "chat"
+            logger.info("agent→chat downgrade for plain chat turn before request coercion")
         # Did the USER explicitly pick agent mode? (vs. us auto-escalating
         # below). Skill extraction should only learn from real agent sessions,
         # not chats we quietly promoted for a notes/calendar intent.
@@ -438,11 +485,24 @@ def setup_chat_routes(
             message, session = coerce_message_and_session(
                 body, message, session, session_manager, allow_empty=_has_atts,
             )
+            if (
+                requested_chat_mode == "agent"
+                and not multiagent_mode
+                and _is_plain_chat_turn(str(message or ""))
+            ):
+                plain_agent_turn = True
+                chat_mode = "chat"
+                logger.info("agent→chat local reply for plain chat turn after request coercion")
+            elif chat_mode == "agent" and not multiagent_mode and _is_plain_chat_turn(str(message or "")):
+                plain_agent_turn = True
+                chat_mode = "chat"
+                logger.info("agent→chat downgrade for plain chat turn after request coercion")
             # Verify ownership AFTER coerce (which may resolve a default session)
             # but BEFORE loading. Prevents cross-user session hijack.
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            _canonicalize_agentcore_session_endpoint(sess, session)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
                 raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
             # Issue #587: picker shows a model from the endpoint cache but
@@ -474,6 +534,46 @@ def setup_chat_routes(
 
         # Ensure session has auth headers
         resolve_session_auth(sess, session, owner=effective_user(request))
+
+        _has_atts = (
+            bool(body and isinstance(body.get("attachments"), list) and body["attachments"])
+            or bool(attachments)
+        )
+        _has_external_context = any(
+            str(value).strip().lower() == "true"
+            for value in (use_web, use_research, use_rag)
+        ) or bool(search_context)
+        if plain_agent_turn and not _has_atts and not _has_external_context:
+            set_session_mode(session, "chat")
+            reply = _plain_agent_local_reply(str(message or ""))
+
+            async def _plain_agent_stream() -> AsyncGenerator[str, None]:
+                model_info = {"type": "model_info", "model": sess.model}
+                yield f"data: {json.dumps(model_info)}\n\n"
+                yield f"data: {json.dumps({'delta': reply})}\n\n"
+                if not incognito:
+                    try:
+                        sess.add_message(ChatMessage("user", str(message or "")))
+                        _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
+                        sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
+                        from core.database import update_session_last_accessed
+                        update_session_last_accessed(session)
+                        session_manager.save_sessions()
+                        try:
+                            saved_id = (getattr(sess.history[-1], "metadata", {}) or {}).get("_db_id")
+                        except Exception:
+                            saved_id = None
+                        if saved_id:
+                            yield f"data: {json.dumps({'type': 'message_saved', 'id': saved_id})}\n\n"
+                    except Exception as exc:
+                        logger.warning("Failed to persist local plain-agent reply for %s: %s", session, exc)
+                else:
+                    sess.add_message(ChatMessage("user", str(message or "")))
+                    sess.add_message(ChatMessage("assistant", reply, metadata={"model": sess.model}))
+                yield f"data: {json.dumps({'type': 'metrics', 'data': {'response_time': 0, 'model': sess.model, 'usage_source': 'local'}})}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_plain_agent_stream(), media_type="text/event-stream")
 
         # Check for research_pending BEFORE mode persist overwrites it
         do_research = str(use_research).lower() == "true"

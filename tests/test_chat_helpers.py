@@ -1,5 +1,5 @@
 import pytest
-from routes.chat_helpers import clean_thinking_for_save, needs_auto_name
+from routes.chat_helpers import clean_thinking_for_save, form_flag_enabled, needs_auto_name
 
 
 @pytest.mark.parametrize("name,expected", [
@@ -27,6 +27,23 @@ from routes.chat_helpers import clean_thinking_for_save, needs_auto_name
 ])
 def test_needs_auto_name(name, expected):
     assert needs_auto_name(name) == expected, f"needs_auto_name({name!r}) should be {expected}"
+
+
+@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off", "disable", ""])
+def test_form_flag_enabled_treats_disabled_strings_as_false(value):
+    assert form_flag_enabled(value, default=True) is False
+
+
+@pytest.mark.parametrize("value", ["true", "True", "1", "yes", "on", "enabled", True, 1])
+def test_form_flag_enabled_treats_enabled_values_as_true(value):
+    assert form_flag_enabled(value) is True
+
+
+def test_form_flag_enabled_uses_default_only_for_missing_or_unknown_values():
+    assert form_flag_enabled(None, default=True) is True
+    assert form_flag_enabled(None, default=False) is False
+    assert form_flag_enabled("not-a-bool", default=True) is True
+    assert form_flag_enabled("not-a-bool", default=False) is False
 
 
 def test_clean_thinking_for_save_extracts_gemma4_thought_channel():

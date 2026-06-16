@@ -2,8 +2,18 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from src import llm_core
+
+
+@pytest.fixture(autouse=True)
+def _reset_egress_admin_hosts():
+    """P6.2: reset the egress-guard admin-host provider after each test so the
+    seeded Tailscale host doesn't leak into other tests in this module."""
+    yield
+    from src import egress_guard
+    egress_guard.set_admin_hosts_provider(None)
 
 
 def test_openai_base_url_normalizes_to_chat_completions():
@@ -15,6 +25,20 @@ def test_openai_base_url_normalizes_to_chat_completions():
         llm_core._normalize_openai_chat_url("http://litellm.tail5d39b4.ts.net:4000/v1/chat/completions")
         == "http://litellm.tail5d39b4.ts.net:4000/v1/chat/completions"
     )
+
+
+def test_agentcore_short_chat_url_normalizes_to_chat_completions():
+    assert (
+        llm_core._normalize_openai_chat_url("http://127.0.0.1:7000/api/agentcore/openai/v1/chat")
+        == "http://127.0.0.1:7000/api/agentcore/openai/v1/chat/completions"
+    )
+
+
+def test_agentcore_loopback_url_is_openai_compatible_not_ollama():
+    url = "http://127.0.0.1:7000/api/agentcore/openai/v1/chat/completions"
+
+    assert llm_core._is_ollama_native_url(url) is False
+    assert llm_core._detect_provider(url) == "openai"
 
 
 def test_list_model_ids_uses_models_endpoint_when_given_openai_base(monkeypatch):
@@ -69,6 +93,11 @@ def test_stream_llm_posts_to_chat_completions_when_given_openai_base(monkeypatch
     monkeypatch.setattr(llm_core, "_is_host_dead", lambda *_a, **_k: False)
     monkeypatch.setattr(llm_core, "note_model_activity", lambda *_a, **_k: None)
     monkeypatch.setattr(llm_core, "_clear_host_dead", lambda *_a, **_k: None)
+    # P6.2 egress guard: a private Tailscale endpoint is reachable ONLY because
+    # an admin configured it as a ModelEndpoint. Seed that admin host so the
+    # guard authorizes it (production has the row; the test DB does not).
+    from src import egress_guard
+    egress_guard.set_admin_hosts_provider(lambda: frozenset({"litellm.tail5d39b4.ts.net"}))
 
     async def collect():
         return [

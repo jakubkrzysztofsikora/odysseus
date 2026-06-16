@@ -1,0 +1,17 @@
+{
+  "name": "database-connector",
+  "version": "1.0.0",
+  "description": "A Claude Code plugin that provides database connectivity via MCP",
+  "author": "Test Developer",
+  "license": "MIT",
+  "mcpServers": {
+    "database-server": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/servers/db-server.py",
+      "args": ["--config", "${CLAUDE_PLUGIN_ROOT}/config/config.json"],
+      "env": {
+        "DATABASE_URL": "${DATABASE_URL}",
+        "LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}

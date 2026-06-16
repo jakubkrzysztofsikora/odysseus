@@ -398,6 +398,15 @@ import createResearchSynapse from './researchSynapse.js';
       const rawMsg = (el('message').value || '').trim();
       const currentSetupMode = slashCommands.getSetupMode();
       if (currentSetupMode && rawMsg && !isCommand(rawMsg)) {
+        if (String(currentSetupMode).startsWith('endpoint') && window._isAdmin !== true) {
+          slashCommands.clearSetupMode(true);
+          el('message').value = '';
+          if (window._syncModelPickerAutohide) window._syncModelPickerAutohide();
+          if (uiModule.autoResize) uiModule.autoResize(el('message'));
+          addMessage('assistant', 'Model endpoints are admin-managed. Circit AgentCore is the default backend.');
+          _releaseSendFlag();
+          return;
+        }
         const mode = currentSetupMode;
         slashCommands.clearSetupMode(mode === 'endpoint-provider' || mode === 'endpoint-key-for-provider');
         el('message').value = '';
@@ -463,8 +472,8 @@ import createResearchSynapse from './researchSynapse.js';
           if (uiModule.autoResize) uiModule.autoResize(el('message'));
           addMessage('assistant',
             'No chat session active. You can:\n\n' +
-            '- Open the model picker in the chat box and pick a model\n' +
-            '- Use the `+` button in the model picker to add a model endpoint\n' +
+            '- Open the model picker in the chat box and pick Circit AgentCore\n' +
+            '- Contact an admin if no model is available\n' +
             '- Use `/help` to see all available commands');
           _releaseSendFlag();
           return;
@@ -474,8 +483,8 @@ import createResearchSynapse from './researchSynapse.js';
         if (uiModule.autoResize) uiModule.autoResize(el('message'));
         addMessage('assistant',
           'No chat session active. You can:\n\n' +
-          '- Open the model picker in the chat box and pick a model\n' +
-          '- Use the `+` button in the model picker to add a model endpoint\n' +
+          '- Open the model picker in the chat box and pick Circit AgentCore\n' +
+          '- Contact an admin if no model is available\n' +
           '- Use `/help` to see all available commands');
         _releaseSendFlag();
         return;
@@ -2889,7 +2898,7 @@ import createResearchSynapse from './researchSynapse.js';
             if (_box && sessionModule.getCurrentSessionId() === _timeoutSessionId) {
               var _timeoutMsg = document.createElement('div');
               _timeoutMsg.className = 'msg msg-ai';
-              _timeoutMsg.innerHTML = '<div class="role">Odysseus</div><div class="body" style="opacity:0.6;font-style:italic;">Research clarification timed out. Toggle research again to start over.</div>';
+              _timeoutMsg.innerHTML = '<div class="role">Circitron</div><div class="body" style="opacity:0.6;font-style:italic;">Research clarification timed out. Toggle research again to start over.</div>';
               _box.appendChild(_timeoutMsg);
               uiModule.scrollHistory();
             }

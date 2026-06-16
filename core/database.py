@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
 from sqlalchemy.orm import relationship, sessionmaker, backref
@@ -32,11 +33,42 @@ class TimestampMixin:
 # Get database URL from environment, default to SQLite
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
 
+
+def _sqlite_busy_timeout_seconds() -> float:
+    raw = os.getenv("SQLITE_BUSY_TIMEOUT_SECONDS", "30")
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        logger.warning("Invalid SQLITE_BUSY_TIMEOUT_SECONDS=%r; using 30", raw)
+        return 30.0
+
+
+def _sqlite_busy_timeout_ms() -> int:
+    return int(_sqlite_busy_timeout_seconds() * 1000)
+
+
+def _sqlite_connect(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=_sqlite_busy_timeout_seconds())
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(f"PRAGMA busy_timeout={_sqlite_busy_timeout_ms()}")
+    return conn
+
+
+def _engine_kwargs(database_url: str) -> dict:
+    if "sqlite" not in database_url:
+        return {}
+
+    return {
+        "connect_args": {
+            "check_same_thread": False,
+            "timeout": _sqlite_busy_timeout_seconds(),
+        },
+        "poolclass": NullPool,
+    }
+
+
 # Create engine
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
-)
+engine = create_engine(DATABASE_URL, **_engine_kwargs(DATABASE_URL))
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -51,6 +83,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     if isinstance(dbapi_connection, sqlite3.Connection):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute(f"PRAGMA busy_timeout={_sqlite_busy_timeout_ms()}")
         cursor.close()
 
 
@@ -670,7 +703,7 @@ def _migrate_add_last_message_at_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(sessions)")
         columns = [row[1] for row in cursor.fetchall()]
         if "last_message_at" not in columns:
@@ -706,7 +739,7 @@ def _migrate_add_document_archived_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(documents)")
         columns = [row[1] for row in cursor.fetchall()]
         if "archived" not in columns:
@@ -725,7 +758,7 @@ def _migrate_add_owner_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(sessions)")
         columns = [row[1] for row in cursor.fetchall()]
         if "owner" not in columns:
@@ -744,7 +777,7 @@ def _migrate_model_endpoints():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(model_endpoints)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "base_url" not in columns:
@@ -762,7 +795,7 @@ def _migrate_add_hidden_models_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(model_endpoints)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "hidden_models" not in columns:
@@ -787,7 +820,7 @@ def _migrate_add_model_endpoint_owner_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(model_endpoints)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "owner" not in columns:
@@ -807,7 +840,7 @@ def _migrate_add_model_type_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(model_endpoints)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "model_type" not in columns:
@@ -825,7 +858,7 @@ def _migrate_add_model_endpoint_refresh_columns():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(model_endpoints)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "endpoint_kind" not in columns:
@@ -848,7 +881,7 @@ def _migrate_add_task_run_model_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(task_runs)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "model" not in columns:
@@ -866,7 +899,7 @@ def _migrate_add_supports_tools_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(model_endpoints)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "supports_tools" not in columns:
@@ -885,7 +918,7 @@ def _migrate_add_cached_models_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(model_endpoints)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "cached_models" not in columns:
@@ -902,7 +935,7 @@ def _migrate_add_pinned_models_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(model_endpoints)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "pinned_models" not in columns:
@@ -920,7 +953,7 @@ def _migrate_add_notes_sort_order():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(notes)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "sort_order" not in columns:
@@ -947,7 +980,7 @@ def _migrate_add_mode_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(sessions)")
         columns = [row[1] for row in cursor.fetchall()]
         if "mode" not in columns:
@@ -965,7 +998,7 @@ def _migrate_add_folder_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(sessions)")
         columns = [row[1] for row in cursor.fetchall()]
         if "folder" not in columns:
@@ -983,7 +1016,7 @@ def _migrate_add_token_columns():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(sessions)")
         columns = [row[1] for row in cursor.fetchall()]
         if "total_input_tokens" not in columns:
@@ -1002,7 +1035,7 @@ def _migrate_add_owner_to_table(table_name: str, index_name: str):
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute(f"PRAGMA table_info({table_name})")
         columns = [row[1] for row in cursor.fetchall()]
         if "owner" not in columns:
@@ -1038,7 +1071,7 @@ def _migrate_add_api_token_scopes_column():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         columns = [row[1] for row in conn.execute("PRAGMA table_info(api_tokens)").fetchall()]
         if columns and "scopes" not in columns:
             conn.execute("ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT 'chat'")
@@ -1090,7 +1123,7 @@ def _migrate_assign_legacy_owner():
 
     logger = logging.getLogger(__name__)
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         # Every table with an `owner` column. New tables added later will be
         # picked up automatically because we only UPDATE when the column
         # exists; the explicit list documents intent.
@@ -1634,7 +1667,7 @@ def _migrate_add_email_smtp_security():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(email_accounts)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "smtp_security" not in columns:
@@ -1752,7 +1785,7 @@ def _migrate_add_calendar_is_utc():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(calendar_events)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "is_utc" not in columns:
@@ -1773,7 +1806,7 @@ def _migrate_add_calendar_origin():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(calendar_events)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "origin" not in columns:
@@ -1793,7 +1826,7 @@ def _migrate_add_calendar_metadata():
     if not os.path.exists(db_path):
         return
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _sqlite_connect(db_path)
         cursor = conn.execute("PRAGMA table_info(calendar_events)")
         columns = [row[1] for row in cursor.fetchall()]
         if columns and "importance" not in columns:

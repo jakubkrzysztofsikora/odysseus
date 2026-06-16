@@ -26,6 +26,8 @@ from src.endpoint_resolver import (
     build_headers,
 )
 from src.auth_helpers import _auth_disabled, owner_filter
+from src.cloudflare_admin import cloudflare_mode_enabled, is_cloudflare_admin
+from src.agentcore_model_seed import AGENTCORE_ENDPOINT_ID, agentcore_public_model_alias
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +336,17 @@ def _curate_models(model_ids, provider):
 
 def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def _shared_default_endpoints_enabled() -> bool:
+    configured = os.getenv("ODYSSEUS_SHARED_DEFAULT_ENDPOINTS", "").strip().lower()
+    if configured:
+        return configured in ("true", "1", "yes", "on")
+    return cloudflare_mode_enabled()
+
+
+def _cloudflare_agentcore_only_for_user(owner: str, is_admin: bool) -> bool:
+    return bool(owner) and cloudflare_mode_enabled() and not is_admin
 
 
 _ENDPOINT_KINDS = {"auto", "local", "api", "proxy"}
@@ -1018,7 +1031,9 @@ def setup_model_routes(model_discovery):
         db = SessionLocal()
         try:
             q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-            if owner and not is_admin:
+            if _cloudflare_agentcore_only_for_user(owner, is_admin):
+                q = q.filter(ModelEndpoint.id == AGENTCORE_ENDPOINT_ID)
+            elif owner and not is_admin:
                 # Regular users see: their own endpoints + null-owner
                 # (legacy / shared). Admins see everything.
                 q = owner_filter(q, ModelEndpoint, owner)
@@ -1110,9 +1125,12 @@ def setup_model_routes(model_discovery):
         # users get the owner-scoped view.
         _is_admin = False
         try:
-            auth_mgr = getattr(request.app.state, "auth_manager", None)
-            if owner and auth_mgr is not None and getattr(auth_mgr, "is_admin", None):
-                _is_admin = bool(auth_mgr.is_admin(owner))
+            if getattr(request.state, "auth_mode", None) == "cloudflare_access" or cloudflare_mode_enabled():
+                _is_admin = is_cloudflare_admin(owner)
+            else:
+                auth_mgr = getattr(request.app.state, "auth_manager", None)
+                if owner and auth_mgr is not None and getattr(auth_mgr, "is_admin", None):
+                    _is_admin = bool(auth_mgr.is_admin(owner))
         except Exception:
             _is_admin = False
         now = _time.time()
@@ -1432,10 +1450,9 @@ def setup_model_routes(model_discovery):
         supports_tools: str = Form(""),  # "true"/"false"/"" (unknown)
         pinned_models: str = Form(""),  # admin-pinned IDs: list/JSON/comma/newline
         container_local: str = Form("false"),
-        # Default `shared=true` → endpoints are visible to all users (the
-        # app's historical behaviour). Admins can pass `shared=false` to
-        # scope a new endpoint to their own account only.
-        shared: str = Form("true"),
+        # Default is admin-owned. Use shared=true only for explicit legacy
+        # shared endpoints; Cloudflare users still see only AgentCore.
+        shared: str = Form("false"),
     ):
         require_admin(request)
         base_url = _normalize_base(base_url)
@@ -1798,17 +1815,28 @@ def setup_model_routes(model_discovery):
         settings = _load_settings()
         _is_admin = False
         try:
-            auth_mgr = getattr(request.app.state, "auth_manager", None)
-            if _user and auth_mgr is not None and getattr(auth_mgr, "is_admin", None):
-                _is_admin = bool(auth_mgr.is_admin(_user))
+            if getattr(request.state, "auth_mode", None) == "cloudflare_access" or cloudflare_mode_enabled():
+                _is_admin = is_cloudflare_admin(_user)
+            else:
+                auth_mgr = getattr(request.app.state, "auth_manager", None)
+                if _user and auth_mgr is not None and getattr(auth_mgr, "is_admin", None):
+                    _is_admin = bool(auth_mgr.is_admin(_user))
         except Exception:
             _is_admin = False
-        if _user and not _is_admin:
+        if _cloudflare_agentcore_only_for_user(_user, _is_admin):
+            ep_id = AGENTCORE_ENDPOINT_ID
+            model = agentcore_public_model_alias()
+            _fallbacks = []
+        elif _user and not _is_admin:
             from routes.prefs_routes import _load_for_user
             _user_prefs = _load_for_user(_user) or {}
             ep_id = (_user_prefs.get("default_endpoint_id") or "").strip()
             model = (_user_prefs.get("default_model") or "").strip()
             _fallbacks = _user_prefs.get("default_model_fallbacks") or []
+            if not ep_id and _shared_default_endpoints_enabled():
+                ep_id = settings.get("default_endpoint_id", "")
+                model = settings.get("default_model", "")
+                _fallbacks = settings.get("default_model_fallbacks") or []
         else:
             ep_id = settings.get("default_endpoint_id", "")
             model = settings.get("default_model", "")
@@ -1862,7 +1890,12 @@ def setup_model_routes(model_discovery):
             if not ep:
                 _last_q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
                 if _user and not _is_admin:
-                    _last_q = owner_filter(_last_q, ModelEndpoint, _user, include_shared=False)
+                    _last_q = owner_filter(
+                        _last_q,
+                        ModelEndpoint,
+                        _user,
+                        include_shared=_shared_default_endpoints_enabled(),
+                    )
                 ep = _last_q.first()
             if not ep:
                 return {"endpoint_id": "", "endpoint_url": "", "model": ""}

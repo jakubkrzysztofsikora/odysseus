@@ -9,6 +9,13 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 
 export const THEMES = {
+  circit:     { bg:'#fcf9f5', fg:'#0a0610', panel:'#ffffff', border:'#efefef', red:'#61409b', green:'#2ea478',
+                advanced: { sendBtnBg: '#61409b', sendBtnHover: '#4c317d',
+                            userBubbleBg: '#f6f3ef', aiBubbleBg: '#ffffff',
+                            inputBg: '#ffffff', sidebarBg: '#0a0610',
+                            sidebarFg: '#fcf9f5', sidebarMuted: '#c5c0bb',
+                            sidebarHoverBg: '#221f25', sidebarActiveBg: '#2b213f',
+                            brandColor: '#fcf9f5', hamburgerColor: '#fcf9f5' } },
   dark:       { bg:'#282c34', fg:'#9cdef2', panel:'#111111', border:'#355a66', red:'#e06c75' },
   light:      { bg:'#f0ebe3', fg:'#5a5248', panel:'#faf6f0', border:'#d4cdc2', red:'#c47d5a' },
   midnight:   { bg:'#0d1117', fg:'#c9d1d9', panel:'#161b22', border:'#30363d', red:'#f85149' },
@@ -31,16 +38,16 @@ export const THEMES = {
   cute:       { bg:'#fff0f5', fg:'#d4608a', panel:'#fff8fa', border:'#f0c0d0', red:'#ff6b9d' },
 };
 
-const DEFAULT_THEME = 'dark';
+const DEFAULT_THEME = 'circit';
 const LS_KEY = 'odysseus-theme';
 const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
 
 const FONT_MAP = {
-  mono: "'Fira Code', monospace",
-  sans: "system-ui, -apple-system, 'Segoe UI', sans-serif",
-  serif: "Georgia, 'Times New Roman', serif",
+  mono: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+  sans: "var(--c-font-primary, 'Basis Grotesque Pro', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif)",
+  serif: "var(--c-font-primary, 'Basis Grotesque Pro', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif)",
 };
-const DEFAULT_FONT = 'mono';
+const DEFAULT_FONT = 'sans';
 const DEFAULT_DENSITY = 'comfortable';
 const MAX_CUSTOM_THEMES = 8;
 
@@ -183,7 +190,11 @@ const ADV_KEYS = [
   { key: 'aiBubbleBg',         css: '--ai-bubble-bg',      label: 'AI Chat Bubble',   group: 'Chat Bubbles' },
   { key: 'bubbleBorder',       css: '--bubble-border',     label: 'Border Chat Bubble', group: 'Chat Bubbles' },
   { key: 'sidebarBg',          css: '--sidebar-bg',        label: 'Sidebar Bg',       group: 'Sidebar' },
-  { key: 'brandColor',         css: '--brand-color',       label: 'Odysseus Logo',    group: 'Sidebar' },
+  { key: 'sidebarFg',          css: '--sidebar-fg',        label: 'Sidebar Text',     group: 'Sidebar' },
+  { key: 'sidebarMuted',       css: '--sidebar-muted',     label: 'Sidebar Muted',    group: 'Sidebar' },
+  { key: 'sidebarHoverBg',     css: '--sidebar-hover-bg',  label: 'Sidebar Hover',    group: 'Sidebar' },
+  { key: 'sidebarActiveBg',    css: '--sidebar-active-bg', label: 'Sidebar Active',   group: 'Sidebar' },
+  { key: 'brandColor',         css: '--brand-color',       label: 'Circit AI Logo',   group: 'Sidebar' },
   { key: 'hamburgerColor',     css: '--hamburger-color',   label: 'Hamburger Menu',   group: 'Sidebar' },
   { key: 'inputBg',            css: '--input-bg',          label: 'Input Bg',         group: 'Chat Input / Prompt Area' },
   { key: 'inputBorder',        css: '--input-border',      label: 'Input Border',     group: 'Chat Input / Prompt Area' },
@@ -197,11 +208,17 @@ const ADV_KEYS = [
 function computeAdvancedDefaults(colors) {
   const syn = deriveSyntaxColors(colors);
   const red = colors.red || '#e06c75';
+  const [fgH, fgS, fgL] = hexToHSL(colors.fg);
+  const isDarkSidebar = (hexToHSL(colors.panel)[2] < 45);
   return {
     userBubbleBg: colors.bg,
     aiBubbleBg: colors.panel,
     bubbleBorder: colors.border,
     sidebarBg: colors.panel,
+    sidebarFg: colors.fg,
+    sidebarMuted: hslToHex(fgH, Math.max(fgS - 10, 0), isDarkSidebar ? Math.min(fgL + 20, 88) : Math.max(fgL - 20, 18)),
+    sidebarHoverBg: isDarkSidebar ? hslToHex(fgH, Math.max(fgS - 15, 0), 18) : colors.bg,
+    sidebarActiveBg: isDarkSidebar ? hslToHex(fgH, Math.max(fgS - 10, 0), 22) : colors.bg,
     brandColor: red,
     hamburgerColor: colors.fg,
     inputBg: colors.panel,
@@ -290,7 +307,7 @@ export function applyColors(colors) {
 
 // Per-route SVG shape registry — kept in sync with the inline favicon
 // script in index.html so a theme change keeps the route icon, not the
-// default boat. Returns the inner SVG markup colored with `fg`.
+// default Circit site icon. Returns the inner SVG markup colored with `fg`.
 const _ROUTE_FAVICON_SHAPES = {
   '/calendar':
     "<rect x='4' y='6' width='24' height='22' rx='2' fill='none' stroke='__C__' stroke-width='2.5'/>" +
@@ -329,27 +346,28 @@ const _ROUTE_FAVICON_SHAPES = {
 function _updateFavicon(fg) {
   const path = (window.location.pathname || '').toLowerCase();
   const routeShape = _ROUTE_FAVICON_SHAPES[path];
-  let svg;
-  if (routeShape) {
-    svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>${routeShape.split('__C__').join(fg)}</svg>`;
-  } else {
-    svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 4L16 22L6 22Z' fill='${fg}'/><path d='M16 8L16 22L24 22Z' fill='${fg}' opacity='0.6'/><path d='M4 24Q10 20 16 24Q22 28 28 24' stroke='${fg}' stroke-width='2.5' fill='none' stroke-linecap='round'/></svg>`;
-  }
-  const href = 'data:image/svg+xml,' + encodeURIComponent(svg);
   let link = document.querySelector("link[rel='icon']");
   if (!link) {
     link = document.createElement('link');
     link.rel = 'icon';
-    link.type = 'image/svg+xml';
     document.head.appendChild(link);
   }
-  link.href = href;
   let apple = document.querySelector("link[rel='apple-touch-icon']");
   if (!apple) {
     apple = document.createElement('link');
     apple.rel = 'apple-touch-icon';
     document.head.appendChild(apple);
   }
+  if (!routeShape) {
+    link.type = 'image/jpeg';
+    link.href = '/static/vendor/circit-ds/circit-favicon.jpg';
+    apple.href = '/static/vendor/circit-ds/circit-favicon.jpg';
+    return;
+  }
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>${routeShape.split('__C__').join(fg)}</svg>`;
+  const href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+  link.type = 'image/svg+xml';
+  link.href = href;
   apple.href = href;
 }
 

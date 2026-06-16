@@ -27,6 +27,10 @@ DIRS = [
 ]
 
 
+def cloudflare_access_mode_enabled():
+    return os.getenv("ODYSSEUS_AUTH_MODE", "").strip().lower() == "cloudflare_access"
+
+
 def create_dirs():
     for d in DIRS:
         os.makedirs(d, exist_ok=True)
@@ -72,6 +76,10 @@ def _prompt_admin_credentials():
 
 def create_default_admin():
     """Create an initial admin user if none exists."""
+    if cloudflare_access_mode_enabled():
+        print("  [skip] Cloudflare Access mode enabled; local admin setup disabled")
+        return "cloudflare_access"
+
     auth_path = os.path.join(DATA_DIR, "auth.json")
     if os.path.exists(auth_path):
         print("  [skip] auth.json already exists")
@@ -211,6 +219,8 @@ def main():
         print("Login with your existing admin credentials.\n")
     elif admin_status == "skipped":
         print("Admin creation did not happen: dependencies are missing.\nRun 'pip install bcrypt' and rerun setup.\n")
+    elif admin_status == "cloudflare_access":
+        print("Local admin creation is disabled in Cloudflare Access mode.\n")
     elif admin_status == "failed":
         print("Admin creation did not happen: a system or file error occurred.\nCheck write permissions for the 'data' directory and rerun setup.\n")
     else:  # handling "failed" or any unhandled edge case

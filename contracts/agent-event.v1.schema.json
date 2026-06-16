@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.circit.internal/agent-event.v1.schema.json",
+  "title": "Circit canonical agent-event v1",
+  "description": "Single SSE event protocol the Circit-branded SPA consumes. BOTH runtimes normalize into this: the .NET AgentCore Host (10 AgentEventType frames, streams today) and Odysseus (~28 SSE types + 10 ui_event control verbs). The edge normalizer maps each native frame to one canonical 'kind' or drops it. v1 constraint: a single run does not mix runtimes mid-conversation; correlationId links a cowork task to an Odysseus session for a unified transcript + audit.",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "id", "correlationId", "source", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "1",
+      "description": "Canonical schema major version. Bump on breaking change."
+    },
+    "kind": {
+      "type": "string",
+      "description": "Normalized event kind. Closed enum — every native frame maps to one of these or is dropped at the edge.",
+      "enum": [
+        "text.delta",
+        "tool.call",
+        "tool.result",
+        "subagent.call",
+        "subagent.result",
+        "plan.created",
+        "plan.revision",
+        "step.started",
+        "step.completed",
+        "step.failed",
+        "task.completed",
+        "task.failed",
+        "user.intervention",
+        "document.delta",
+        "document.update",
+        "metrics",
+        "model.info",
+        "web.sources",
+        "ui.control",
+        "error"
+      ]
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Per-event unique id (native event id or a freshly minted one)."
+    },
+    "correlationId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Links every event of a logical run across runtimes. cowork taskId or Odysseus sessionId."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["cowork", "odysseus"],
+      "description": "Which backend produced the native frame this was normalized from."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic per-stream ordering hint set by the edge."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event time (ISO-8601). Edge fills if the native frame lacks one."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Human-readable one-line summary. May be empty for pure deltas."
+    },
+    "actor": {
+      "type": ["object", "null"],
+      "description": "The authenticated caller this event is attributed to (from the gateway assertion). Null only for legacy/unscoped events pre-P1.2.",
+      "additionalProperties": false,
+      "properties": {
+        "oid": { "type": "string", "description": "Stable Entra object id." },
+        "user": { "type": "string" },
+        "team": { "type": ["string", "null"] }
+      },
+      "required": ["oid"]
+    },
+    "data": {
+      "type": "object",
+      "description": "Kind-specific payload. Shapes for tool.result / subagent.* finalize in P4.1; v1 carries them through opaquely.",
+      "additionalProperties": true
+    }
+  }
+}

@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 REMOTE_HTTP_TRANSPORTS = {"http", "streamable-http", "streamable_http"}
 
+# Internal API base URL - configurable via env var, defaults to localhost:7000
+_INTERNAL_API_BASE = os.getenv("ODYSSEUS_INTERNAL_API_URL", "http://localhost:7000")
+_MCP_CALLBACK_URL = f"{_INTERNAL_API_BASE}/api/mcp/oauth/callback"
+
 
 def normalize_mcp_transport(transport: str) -> str:
     """Normalize user-facing MCP transport aliases to internal names."""
@@ -25,6 +29,30 @@ def normalize_mcp_transport(transport: str) -> str:
     if value in REMOTE_HTTP_TRANSPORTS:
         return "streamable_http"
     return value
+
+
+class McpTransportRejected(Exception):
+    """Raised when an MCP transport is refused by the fail-closed policy gate."""
+
+
+def stdio_mcp_allowed() -> bool:
+    """Whether stdio-transport MCP servers may be connected (P3.3 — FAIL-CLOSED).
+
+    Registering a stdio server is equivalent to executing an arbitrary binary
+    on the host with the process environment (RCE surface). The route layer
+    already gates ``add_server`` behind ``require_admin``, but the connection
+    actually happens here in ``McpManager.connect_server`` — reached by BOTH the
+    route AND ``connect_all_enabled`` (the DB/startup path, which a loopback
+    caller can trigger without passing the route). Enforcing here closes the
+    loopback bypass the plan flagged.
+
+    Policy (FAIL-CLOSED by default — opt-IN for local dev only):
+      - ``ODYSSEUS_MCP_ALLOW_STDIO=1``  → allow stdio MCP (single-user desktop / dev).
+      - unset / ``0``                   → **DENY** (default in managed/cloud deploys).
+    """
+    return (os.environ.get("ODYSSEUS_MCP_ALLOW_STDIO", "") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def _startup_mcp_remote_args(args: List[str], per_server_timeout: float) -> List[str]:
@@ -315,9 +343,10 @@ def _oauth_access_token_expired(token_file: str, skew_seconds: int = 60) -> bool
 class FileTokenStorage:
     """File-backed token storage implementing the MCP SDK TokenStorage protocol."""
 
-    def __init__(self, token_file: str):
+    def __init__(self, token_file: str, client_info: Optional[dict] = None):
         self._token_file = token_file
         self._client_info_file = token_file.replace(".json", "_client.json")
+        self._client_info = client_info or None
 
     def access_token_expired(self) -> bool:
         return _oauth_access_token_expired(self._token_file)
@@ -343,6 +372,8 @@ class FileTokenStorage:
         if os.path.exists(self._client_info_file):
             with open(self._client_info_file) as f:
                 return OAuthClientInformationFull.model_validate(json.load(f))
+        if self._client_info:
+            return OAuthClientInformationFull.model_validate(self._client_info)
         return None
 
     async def set_client_info(self, client_info) -> None:
@@ -454,6 +485,24 @@ class McpManager:
         try:
             transport = normalize_mcp_transport(transport)
             if transport == "stdio":
+                # Fail-closed chokepoint (P3.3): reject stdio at the MANAGER layer,
+                # not just the route, so the DB/startup path (connect_all_enabled)
+                # and any loopback caller are covered too.
+                if not stdio_mcp_allowed():
+                    logger.warning(
+                        "MCP stdio transport rejected by policy for %s (%s): "
+                        "ODYSSEUS_MCP_ALLOW_STDIO is not set (stdio is fail-closed by default).", name, server_id)
+                    self._connections[server_id] = {
+                        "status": "error",
+                        "name": name,
+                        "error": (
+                            "stdio MCP servers are disabled on this deployment "
+                            "(arbitrary local-binary execution). Use a remote "
+                            "(SSE / streamable-http) MCP server from the curated allowlist."
+                        ),
+                    }
+                    self._generation += 1
+                    return False
                 res = await self._connect_stdio(server_id, name, command, args or [], env or {})
             elif transport == "sse":
                 res = await self._connect_sse(server_id, name, url, oauth_config)
@@ -552,7 +601,7 @@ class McpManager:
 
         token_file = os.path.expanduser(oauth_config.get("token_file", ""))
         redirect_uris_raw = oauth_config.get("redirect_uris") or [
-            "http://localhost:7000/api/mcp/oauth/callback"
+            _MCP_CALLBACK_URL
         ]
         redirect_uris = [
             u if isinstance(u, AnyUrl) else AnyUrl(u) for u in redirect_uris_raw
@@ -561,7 +610,19 @@ class McpManager:
         if isinstance(scope, list):
             scope = " ".join(scope)
 
-        storage = FileTokenStorage(token_file)
+        configured_client = None
+        if oauth_config.get("client_id"):
+            configured_client = {
+                "client_id": oauth_config["client_id"],
+                "client_secret": oauth_config.get("client_secret"),
+                "token_endpoint_auth_method": oauth_config.get("token_endpoint_auth_method", "none"),
+                "redirect_uris": [str(u) for u in redirect_uris],
+                "grant_types": oauth_config.get("grant_types", ["authorization_code", "refresh_token"]),
+                "response_types": oauth_config.get("response_types", ["code"]),
+                "scope": scope,
+                "client_name": oauth_config.get("client_name", "Circitron"),
+            }
+        storage = FileTokenStorage(token_file, configured_client)
         client_metadata = OAuthClientMetadata(
             client_name=oauth_config.get("client_name", "Odysseus"),
             redirect_uris=redirect_uris,

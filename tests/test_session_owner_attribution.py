@@ -175,3 +175,51 @@ def test_unauthenticated_caller_rejected(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         SR._verify_session_owner(req, "sid")
     assert exc.value.status_code == 403
+
+
+# --- P1.2 EXTENSION: identity-SOURCE swap under the existing effective_user seam
+# The real P1.2 work is swapping the identity source (cookie/bcrypt -> Entra oid)
+# UNDER this seam, not building owner-scoping (which already ships). These cases
+# prove that when current_user carries an Entra oid instead of a cookie username,
+# the SAME seam attributes and isolates correctly — no rewrite of the existing
+# owner-scoping. Rows are now keyed by oid (post one-time username->oid re-key).
+
+def test_entra_oid_cookieless_user_is_attributed(monkeypatch):
+    # Entra principal: current_user is the oid; effective_user returns it as-is.
+    oid = "00000000-aaaa-bbbb-cccc-111111111111"
+    assert effective_user(_req(api_token=False, current_user=oid)) == oid
+
+
+def test_entra_bearer_token_attributes_to_owner_oid():
+    # A paired client whose token owner is an Entra oid acts as that oid.
+    oid = "00000000-aaaa-bbbb-cccc-222222222222"
+    assert effective_user(_req(api_token=True, api_token_owner=oid, current_user="api")) == oid
+
+
+def test_entra_oid_A_cannot_verify_oid_B_session(monkeypatch):
+    # Cross-owner isolation holds with oids exactly as it did with usernames.
+    oid_b = "00000000-aaaa-bbbb-cccc-bbbbbbbbbbbb"
+    oid_a = "00000000-aaaa-bbbb-cccc-aaaaaaaaaaaa"
+    monkeypatch.setattr(SR, "SessionLocal", _session_local_returning(oid_b))
+    req = _req(api_token=True, api_token_owner=oid_a, current_user="api")
+    with pytest.raises(HTTPException) as exc:
+        SR._verify_session_owner(req, "sid-owned-by-B")
+    assert exc.value.status_code == 404
+
+
+def test_entra_oid_owner_can_verify_their_own_session(monkeypatch):
+    oid_a = "00000000-aaaa-bbbb-cccc-aaaaaaaaaaaa"
+    monkeypatch.setattr(SR, "SessionLocal", _session_local_returning(oid_a))
+    req = _req(api_token=True, api_token_owner=oid_a, current_user="api")
+    SR._verify_session_owner(req, "sid-owned-by-A")  # must not raise
+
+
+def test_null_owner_row_is_denied(monkeypatch):
+    # Null-owner policy (plan §1.2): legacy/shared rows carry owner=None. They
+    # must NOT be readable cross-owner, else the owner filter is bypassable via
+    # legacy rows. A None-owner row is treated as "owned by nobody" -> 404.
+    monkeypatch.setattr(SR, "SessionLocal", _session_local_returning(None))
+    req = _req(api_token=True, api_token_owner="00000000-aaaa-bbbb-cccc-aaaaaaaaaaaa", current_user="api")
+    with pytest.raises(HTTPException) as exc:
+        SR._verify_session_owner(req, "legacy-null-owner-sid")
+    assert exc.value.status_code == 404

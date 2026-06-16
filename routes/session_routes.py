@@ -12,6 +12,8 @@ from core.models import ChatMessage
 from src.request_models import SessionResponse
 from core.database import Session as DbSession, SessionLocal, Document, GalleryImage
 from src.auth_helpers import get_current_user, effective_user
+from src.cloudflare_admin import cloudflare_mode_enabled, is_cloudflare_admin
+from src.agentcore_model_seed import AGENTCORE_ENDPOINT_ID
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -129,6 +131,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["sessions"])
 
 def _current_user_is_admin(request: Request, user: str | None) -> bool:
+    if getattr(request.state, "auth_mode", None) == "cloudflare_access" or cloudflare_mode_enabled():
+        return is_cloudflare_admin(user)
     if not user:
         return False
     auth_mgr = getattr(request.app.state, "auth_manager", None)
@@ -157,6 +161,19 @@ def _reject_raw_endpoint_url_for_non_admin(
     # endpoint validation have already happened.
     if user and not _current_user_is_admin(request, user):
         raise HTTPException(403, "Choose a registered model endpoint")
+
+
+def _reject_non_agentcore_endpoint_for_cloudflare_user(
+    request: Request,
+    user: str | None,
+    endpoint_id: str | None,
+) -> None:
+    if not user or _current_user_is_admin(request, user):
+        return
+    if not cloudflare_mode_enabled() and getattr(request.state, "auth_mode", None) != "cloudflare_access":
+        return
+    if endpoint_id and endpoint_id.strip() != AGENTCORE_ENDPOINT_ID:
+        raise HTTPException(403, "Circit AgentCore is the only available model endpoint")
 
 
 def _persist_session_headers(session_id: str, headers: dict | None) -> None:
@@ -331,6 +348,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         endpoint_api_key = ""
         endpoint_base_url = ""
         _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
+        _reject_non_agentcore_endpoint_for_cloudflare_user(request, user, endpoint_id)
         if endpoint_id and endpoint_id.strip():
             from core.database import ModelEndpoint
             from src.auth_helpers import owner_filter
@@ -359,9 +377,9 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         request_api_key = api_key.strip() if api_key else ""
         effective_api_key = request_api_key or endpoint_api_key
         validation_headers = None
-        if effective_api_key:
-            from src.endpoint_resolver import build_headers
-            validation_headers = build_headers(effective_api_key, endpoint_base_url or endpoint_url)
+        from src.endpoint_resolver import build_headers, is_agentcore_openai_base
+        if effective_api_key or is_agentcore_openai_base(endpoint_base_url or endpoint_url):
+            validation_headers = build_headers(effective_api_key or None, endpoint_base_url or endpoint_url, owner=user)
 
         if skip_val:
             # skip_validation = trust the caller and do NOT probe /v1/models.
@@ -427,9 +445,9 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         if not resolved_key and endpoint_api_key:
             resolved_key = endpoint_api_key
             resolved_base = endpoint_base_url
-        if resolved_key:
+        if resolved_key or is_agentcore_openai_base(resolved_base):
             from src.endpoint_resolver import build_headers
-            session.headers = build_headers(resolved_key, resolved_base)
+            session.headers = build_headers(resolved_key or None, resolved_base, owner=user)
             _persist_session_headers(sid, session.headers)
         # Fire webhook (sync-safe)
         if webhook_manager:
@@ -478,6 +496,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         if model is not None and endpoint_url is not None:
             user = effective_user(request)
             _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
+            _reject_non_agentcore_endpoint_for_cloudflare_user(request, user, endpoint_id)
             endpoint_api_key = ""
             endpoint_base_url = ""
             if endpoint_id:
@@ -503,9 +522,10 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             session.model = model
             session.endpoint_url = endpoint_url
             # Update auth headers from the endpoint's stored API key
-            if endpoint_api_key:
+            from src.endpoint_resolver import is_agentcore_openai_base
+            if endpoint_api_key or is_agentcore_openai_base(endpoint_base_url):
                 from src.endpoint_resolver import build_headers
-                session.headers = build_headers(endpoint_api_key, endpoint_base_url)
+                session.headers = build_headers(endpoint_api_key or None, endpoint_base_url, owner=user)
             else:
                 session.headers = {}
             # Persist to DB

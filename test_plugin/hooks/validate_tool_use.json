@@ -1,0 +1,13 @@
+{
+  "name": "validate_tool_use",
+  "description": "Validates tool commands before execution to prevent dangerous operations",
+  "type": "prompt",
+  "event": "PreToolUse",
+  "prompt": "Analyze the following tool usage request and determine if it should be allowed:\n\nTool: ${TOOL_NAME}\nCommand: ${TOOL_INPUT}\n\nSecurity policies:\n- Blocked commands: rm -rf, chmod 777, wget with --no-check-certificate\n- Allowed directories: /tmp, /home/user/projects\n- All bash commands must be in allowed directories\n\nRespond with JSON: {\"allow\": boolean, \"reason\": string}",
+  "timeout": 30,
+  "priority": 1,
+  "conditions": {
+    "tool_names": ["bash", "shell", "execute"],
+    "min_confidence": 0.9
+  }
+}

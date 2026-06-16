@@ -1,0 +1,199 @@
+/* ============================================================
+   CIRCIT — Design System foundations (VENDORED into Odysseus)
+   Source: circit-design-system/project/colors_and_type.css
+           (mirrors live Webflow tokens at circit.io, May 2026)
+
+   VENDORING NOTES (P5.-1):
+   - The 5 Basis Grotesque Pro .woff2 (Colophon Foundry, licensed-embed)
+     live next to this file in ./fonts/ and are served self-hosted from
+     /static/vendor/circit-ds/fonts/ — NO CSP change needed (font-src 'self').
+   - The upstream `@import url("https://fonts.googleapis.com/...Inter...")`
+     was REMOVED on vendoring: Odysseus's CSP is
+       font-src 'self' https://cdn.jsdelivr.net
+     which does NOT allow fonts.googleapis.com. Inter is already
+     self-hosted at /static/fonts/Inter-*.woff2, so the --font-primary
+     fallback chain still resolves Inter without any remote fetch.
+   - Element-default rules (html/body background+color, h1..h6, etc.) from
+     the upstream file were INTENTIONALLY DROPPED. In Option B the live
+     semantic layer is Odysseus's --bg/--fg/--accent (mutated at runtime by
+     the theme editor in static/js/theme.js). Circit --c-* tokens must sit
+     UNDER that layer so user customs still compose; they are exposed here as
+     raw palette + opt-in recipe classes only, never as global element resets.
+   ============================================================ */
+
+/* ---------- 1. Fonts (self-hosted, repo-relative) ---------- */
+@font-face {
+  font-family: "Basis Grotesque Pro";
+  src: url("/static/vendor/circit-ds/fonts/670e3f84a24ba65d7a34258b_basis-grotesque-light-pro.woff2") format("woff2");
+  font-weight: 200 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Basis Grotesque Pro";
+  src: url("/static/vendor/circit-ds/fonts/670e3f782a9ad1fa52cd9260_basis-grotesque-regular-pro.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Basis Grotesque Pro";
+  src: url("/static/vendor/circit-ds/fonts/670e4075a6105a71985ff727_basis-grotesque-medium-pro.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Basis Grotesque Pro";
+  src: url("/static/vendor/circit-ds/fonts/694a927917622c3be48f92de_basis-grotesque-bold-pro.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Basis Grotesque Pro";
+  src: url("/static/vendor/circit-ds/fonts/670e3f78260863d56aa9349a_basis-grotesque-black-pro.woff2") format("woff2");
+  font-weight: 800 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* —— Brand —— */
+  --c-brand:            #61409b;   /* Purple/600 — primary brand */
+  --c-brand-text:       #0a0610;   /* Text on brand backgrounds */
+  --c-surface-light:    #ffffff;
+  --c-surface-warm:     #fcf9f5;   /* Beige/100 — dominant tinted surface */
+
+  /* —— Purple ramp —— */
+  --c-purple-50:  #f5f0ff;
+  --c-purple-100: #eadffe;
+  --c-purple-200: #d1baff;
+  --c-purple-300: #b893ff;
+  --c-purple-400: #a179ed;
+  --c-purple-500: #8a61d4;
+  --c-purple-600: #61409b;
+  --c-purple-700: #4c317d;
+  --c-purple-800: #3f2c60;
+  --c-purple-900: #22153a;
+
+  /* —— Green ramp (success / trust ecosystem) —— */
+  --c-green-50:  #e9f8f3;
+  --c-green-100: #caf2e3;
+  --c-green-200: #8fdfc1;
+  --c-green-300: #65c4a1;
+  --c-green-400: #67c9a4;
+  --c-green-500: #2ea478;   /* "Learn more →" link colour */
+  --c-green-600: #378c6c;
+  --c-green-700: #0e7a52;
+  --c-green-800: #0d6041;
+  --c-green-900: #0a2d1f;
+
+  /* —— Lime —— */
+  --c-lime-50:  #f9fbe4;
+  --c-lime-100: #ecf59f;
+  --c-lime-200: #e3ef7e;
+  --c-lime-300: #d3e159;
+  --c-lime-400: #ccdb56;
+  --c-lime-500: #b4ca03;
+  --c-lime-600: #a6ba0c;
+  --c-lime-700: #8b9a0e;
+  --c-lime-800: #4a5107;
+  --c-lime-900: #2f3406;
+
+  /* —— Red (risk / alert) —— */
+  --c-red-50:  #fdf0ef;
+  --c-red-100: #fededd;
+  --c-red-200: #facdcd;
+  --c-red-300: #ffb0b0;
+  --c-red-400: #fb9292;
+  --c-red-500: #e73737;
+  --c-red-600: #cf0808;
+  --c-red-700: #a30f11;
+  --c-red-800: #660b0a;
+  --c-red-900: #370707;
+
+  /* —— Beige (warm neutral, dominant surface) —— */
+  --c-beige-50:  #fffefc;
+  --c-beige-100: #fcf9f5;
+  --c-beige-200: #f6f3ef;
+  --c-beige-300: #e4e0db;
+  --c-beige-400: #d7d3ce;
+  --c-beige-500: #c5c0bb;
+  --c-beige-600: #ada7a1;
+  --c-beige-700: #8e8880;
+  --c-beige-800: #706860;
+  --c-beige-900: #544e48;
+
+  /* —— Grey (text + cool neutrals) —— */
+  --c-grey-100: #fdfdfd;
+  --c-grey-200: #f7f7f7;
+  --c-grey-300: #efefef;
+  --c-grey-400: #bfbfbf;
+  --c-grey-500: #939295;
+  --c-grey-600: #504f51;
+  --c-grey-700: #3a383b;
+  --c-grey-800: #1b191e;
+  --c-grey-900: #0a0610;
+
+  /* —— Circit primary typeface (exposed for product code) —— */
+  --c-font-primary: "Basis Grotesque Pro", "Inter", -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  --c-font-mono:    ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* —— Radius / motion (opt-in recipes) —— */
+  --c-r-small: 0.5rem;
+  --c-r-main:  1rem;
+  --c-r-lg:    1.5rem;
+  --c-r-pill:  100vw;
+  --c-stroke-w: 1.5px;
+  --c-ease:     cubic-bezier(0.22, 0.61, 0.36, 1);
+  --c-dur-fast: 150ms;
+  --c-dur:      300ms;
+}
+
+/* ============================================================
+   Opt-in recipe classes (NOT global element resets).
+   Use these where a surface is fully ported to the Circit DS.
+   They reference --c-* directly so they look Circit-correct
+   regardless of the active --bg/--fg/--accent theme.
+   ============================================================ */
+
+.c-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: var(--c-r-pill);
+  background: var(--c-purple-100);
+  color: var(--c-purple-800);
+  font: 500 0.875rem/1.5 var(--c-font-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.c-pill--green  { background: var(--c-green-100); color: var(--c-green-800); }
+.c-pill--lime   { background: var(--c-lime-100);  color: var(--c-lime-800); }
+.c-pill--red    { background: var(--c-red-100);   color: var(--c-red-700); }
+.c-pill--beige  { background: var(--c-beige-200); color: var(--c-grey-600); }
+
+.c-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 0.875rem 2rem;
+  height: 52px;
+  border-radius: var(--c-r-pill);
+  background: var(--c-grey-900);
+  color: #ffffff;
+  font: 400 1rem/1.5 var(--c-font-primary);
+  border: 0;
+  cursor: pointer;
+  transition: background var(--c-dur) var(--c-ease), transform var(--c-dur) var(--c-ease);
+  white-space: nowrap;
+}
+.c-btn:hover  { background: var(--c-grey-800); }
+.c-btn:active { transform: scale(0.98); }
+.c-btn--invert { background: #fff; color: var(--c-grey-900); }
+.c-btn--ghost  { background: transparent; color: var(--c-grey-900); border: 1.5px solid var(--c-grey-900); }
+.c-btn--ghost:hover { background: var(--c-grey-900); color: #fff; }

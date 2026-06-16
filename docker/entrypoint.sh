@@ -80,6 +80,15 @@ export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 # vLLM and helper scripts land here because /app is the non-root user's HOME.
 export PATH="/app/.local/bin:$PATH"
 
+if [ "${ODYSSEUS_SQLITE_MIRROR:-0}" = "1" ]; then
+    export ODYSSEUS_SQLITE_MIRROR_SOURCE="${ODYSSEUS_SQLITE_MIRROR_SOURCE:-/app/data/app.db}"
+    export ODYSSEUS_SQLITE_MIRROR_LOCAL="${ODYSSEUS_SQLITE_MIRROR_LOCAL:-/tmp/odysseus-data/app.db}"
+    export DATABASE_URL="sqlite:///${ODYSSEUS_SQLITE_MIRROR_LOCAL}"
+    mkdir -p "$(dirname "$ODYSSEUS_SQLITE_MIRROR_LOCAL")"
+    chown "$PUID:$PGID" "$(dirname "$ODYSSEUS_SQLITE_MIRROR_LOCAL")" 2>/dev/null || true
+    gosu "$PUID:$PGID" python /app/docker/sqlite_mirror.py restore || true
+fi
+
 # Run first-time setup as the app user so data/ files get the right ownership.
 # setup.py is idempotent — skips auth.json / .env if they already exist.
 # || true so a setup failure never prevents the container from starting.
@@ -88,4 +97,7 @@ gosu "$PUID:$PGID" python /app/setup.py || true
 # Drop root and run the actual app. `gosu` is preferred over `su` /
 # `sudo` because it cleans up the process tree (no extra shell layer)
 # so signals (SIGTERM from `docker stop`) reach uvicorn directly.
+if [ "${ODYSSEUS_SQLITE_MIRROR:-0}" = "1" ]; then
+    exec gosu "$PUID:$PGID" python /app/docker/sqlite_mirror.py run -- "$@"
+fi
 exec gosu "$PUID:$PGID" "$@"

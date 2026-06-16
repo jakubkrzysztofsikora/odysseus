@@ -164,6 +164,10 @@ function _initModelPickerDropdown() {
   let _localProbeFetchedAt = 0;
   const _LOCAL_PROBE_TTL_MS = 5000;
 
+  function _canManageModelEndpoints() {
+    return window._isAdmin === true;
+  }
+
   async function _refreshLocalProbe() {
     const now = Date.now();
     if (now - _localProbeFetchedAt < _LOCAL_PROBE_TTL_MS) return;
@@ -613,8 +617,19 @@ function _initModelPickerDropdown() {
   });
   const addModelsBtn = document.getElementById('model-picker-add-models-btn');
   if (addModelsBtn) {
+    const syncAddModelsVisibility = () => {
+      const canManage = _canManageModelEndpoints();
+      addModelsBtn.style.display = canManage ? '' : 'none';
+      addModelsBtn.setAttribute('aria-hidden', canManage ? 'false' : 'true');
+    };
+    syncAddModelsVisibility();
+    window.addEventListener('odysseus:auth-status', syncAddModelsVisibility);
     addModelsBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (!_canManageModelEndpoints()) {
+        if (uiModule && uiModule.showToast) uiModule.showToast('Model endpoints are managed by an admin');
+        return;
+      }
       _openPickerShortcut('models');
     });
   }

@@ -13,6 +13,34 @@ let modalEl = null;
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return uiModule.esc(s); }
+function displayNameFromAuthStatus(d) {
+  const email = String(d?.username || '').trim();
+  const name = String(d?.display_name || d?.name || '').trim();
+  if (name) return name;
+  if (!email.includes('@')) return email;
+  const local = email.split('@')[0] || email;
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  return parts.length ? parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ') : email;
+}
+
+function renderUserAvatar(target, displayName, username, avatarUrl) {
+  if (!target) return;
+  target.innerHTML = '';
+  const url = String(avatarUrl || '').trim();
+  if (/^(https?:\/\/|data:image\/|blob:|\/)/i.test(url)) {
+    const img = document.createElement('img');
+    img.alt = displayName || username || 'User';
+    img.src = url;
+    img.referrerPolicy = 'no-referrer';
+    img.onerror = () => {
+      target.innerHTML = '';
+      target.textContent = (displayName || username || '?')[0].toUpperCase();
+    };
+    target.appendChild(img);
+    return;
+  }
+  target.textContent = (displayName || username || '?')[0].toUpperCase();
+}
 function safeRasterDataUrl(raw) {
   const value = String(raw || '').trim();
   return /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(value) ? value : '';
@@ -2003,11 +2031,14 @@ function initAccount() {
       const nameEl = el('settings-account-username');
       const roleEl = el('settings-account-role');
       const avatarEl = el('settings-account-avatar');
-      if (nameEl) nameEl.textContent = d.username || 'Unknown';
+      const displayName = displayNameFromAuthStatus(d);
+      if (nameEl) {
+        nameEl.textContent = displayName || d.username || 'Unknown';
+        if (d.username) nameEl.title = d.username;
+      }
       if (roleEl) roleEl.textContent = d.is_admin ? 'Admin' : 'User';
       if (avatarEl) {
-        const initial = (d.username || '?')[0].toUpperCase();
-        avatarEl.textContent = initial;
+        renderUserAvatar(avatarEl, displayName, d.username, d.avatar_url);
       }
     }).catch(() => {});
 
@@ -2387,7 +2418,7 @@ async function initReminderSettings() {
   // regardless of channel). The hint should make that clear so
   // users don't think they have to choose between channels.
   const CHANNEL_HINTS = {
-    browser: 'Reminders appear as browser notifications inside Odysseus.',
+    browser: 'Reminders appear as browser notifications inside Circitron.',
     email: 'Reminders are emailed AND shown as a browser notification.',
     ntfy: 'Reminders are pushed via ntfy AND shown as a browser notification.',
   };
@@ -3116,6 +3147,7 @@ const INTG_TYPES = {
   contacts: { label: 'Contacts', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
   carddav: { label: 'CardDAV', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
   email:   { label: 'Email',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>' },
+  exchange_mcp: { label: 'Exchange MCP', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/><path d="M8 2v4"/><path d="M16 2v4"/></svg>' },
   mcp:     { label: 'MCP',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>' },
   codex:   { label: 'Codex',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 10.696.453a6.023 6.023 0 0 0-5.75 4.172 6.061 6.061 0 0 0-3.946 2.945 6.024 6.024 0 0 0 .742 7.099 5.98 5.98 0 0 0 .516 4.911 6.046 6.046 0 0 0 6.51 2.9A5.996 5.996 0 0 0 13.26 23.547a6.023 6.023 0 0 0 5.75-4.172 6.061 6.061 0 0 0 3.946-2.945 6.024 6.024 0 0 0-.674-6.609zM13.26 21.047a4.508 4.508 0 0 1-2.886-1.041l.143-.082 4.793-2.769a.777.777 0 0 0 .391-.676V10.34l2.026 1.17a.072.072 0 0 1 .039.061v5.596a4.532 4.532 0 0 1-4.506 4.48zM3.968 17.64a4.473 4.473 0 0 1-.537-3.018l.143.086 4.793 2.769a.79.79 0 0 0 .782 0l5.852-3.379v2.34a.072.072 0 0 1-.029.062l-4.845 2.796a4.532 4.532 0 0 1-6.159-1.656zM2.804 7.922a4.49 4.49 0 0 1 2.348-1.973V11.6a.778.778 0 0 0 .391.676l5.852 3.378-2.026 1.17a.072.072 0 0 1-.068 0L4.456 14.03a4.532 4.532 0 0 1-1.652-6.108zm16.423 3.823L13.375 8.367l2.026-1.17a.072.072 0 0 1 .068 0l4.845 2.796a4.525 4.525 0 0 1-.7 8.08V12.42a.778.778 0 0 0-.387-.676zm2.015-3.025l-.143-.086-4.793-2.769a.79.79 0 0 0-.782 0L9.672 9.243V6.903a.072.072 0 0 1 .029-.062l4.845-2.796a4.525 4.525 0 0 1 6.696 4.675zM8.598 12.66L6.57 11.49a.072.072 0 0 1-.039-.061V5.833a4.525 4.525 0 0 1 7.413-3.48l-.143.082-4.793 2.769a.777.777 0 0 0-.391.676l-.019 6.78zm1.1-2.379l2.607-1.505 2.607 1.505v3.01l-2.607 1.505-2.607-1.505z"/></svg>' },
   claude:  { label: 'Claude',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>' },
@@ -3132,7 +3164,7 @@ const AGENT_CONFIGS = {
     namePrefix: 'codex agent',
     defaultName: 'Codex Agent',
     pluginPath: '/api/codex/plugin.zip',
-    setupDescription: 'Downloads the plugin bundle and registers it with Codex. Sets <code>ODYSSEUS_URL</code> + <code>ODYSSEUS_API_TOKEN</code>, fetches the plugin from <a href="/api/codex/plugin.zip" style="color:var(--accent,var(--red));">this Odysseus instance</a>, and runs <code>codex plugin add odysseus@personal</code>.',
+    setupDescription: 'Downloads the plugin bundle and registers it with Codex. Sets <code>ODYSSEUS_URL</code> + <code>ODYSSEUS_API_TOKEN</code>, fetches the plugin from <a href="/api/codex/plugin.zip" style="color:var(--accent,var(--red));">this Circitron instance</a>, and runs <code>codex plugin add odysseus@personal</code>.',
     buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
 export ODYSSEUS_API_TOKEN='${token}'
 mkdir -p ~/plugins
@@ -3170,7 +3202,7 @@ python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`,
     namePrefix: 'claude agent',
     defaultName: 'Claude Agent',
     pluginPath: '/api/claude/plugin.zip',
-    setupDescription: 'Downloads the skill bundle into <code>~/.claude/skills/odysseus/</code>. Sets <code>ODYSSEUS_URL</code> + <code>ODYSSEUS_API_TOKEN</code>, fetches the skill from <a href="/api/claude/plugin.zip" style="color:var(--accent,var(--red));">this Odysseus instance</a>. Claude Code auto-loads the skill on next start.',
+    setupDescription: 'Downloads the skill bundle into <code>~/.claude/skills/odysseus/</code>. Sets <code>ODYSSEUS_URL</code> + <code>ODYSSEUS_API_TOKEN</code>, fetches the skill from <a href="/api/claude/plugin.zip" style="color:var(--accent,var(--red));">this Circitron instance</a>. Claude Code auto-loads the skill on next start.',
     buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
 export ODYSSEUS_API_TOKEN='${token}'
 mkdir -p ~/.claude
@@ -3191,9 +3223,45 @@ async function initUnifiedIntegrations() {
   const addBtn = el('unified-intg-add-btn');
   if (!listEl) return;
   let integrationNotice = '';
+  const EXCHANGE_MCP = {
+    mail: 'circit_workiq_mail',
+    calendar: 'circit_workiq_calendar',
+  };
+  const EXCHANGE_MCP_IDS = new Set(Object.values(EXCHANGE_MCP));
 
   function _openEmailSettings() {
     open('email');
+  }
+
+  function _mcpServerId(srv) {
+    return String(srv?.id || srv?.name || '');
+  }
+
+  function _mcpStatusText(srv) {
+    if (!srv) return 'not configured';
+    if (srv.is_enabled === false) return 'disabled';
+    if (srv.needs_oauth) return 'needs auth';
+    if (srv.status === 'connected') return `${srv.enabled_tool_count || 0}/${srv.tool_count || 0} tools`;
+    if (srv.status === 'error') return 'error';
+    return 'disconnected';
+  }
+
+  function _exchangeMcpItem(mcpList) {
+    const byId = new Map((mcpList || []).map(srv => [_mcpServerId(srv), srv]));
+    const mail = byId.get(EXCHANGE_MCP.mail) || null;
+    const calendar = byId.get(EXCHANGE_MCP.calendar) || null;
+    if (!mail && !calendar) return null;
+    const enabled = [mail, calendar].some(srv => srv && srv.is_enabled !== false);
+    const connected = [mail, calendar].some(srv => srv && srv.status === 'connected' && srv.needs_oauth !== true);
+    return {
+      type: 'exchange_mcp',
+      id: '__exchange_mcp__',
+      name: 'Microsoft 365 Exchange',
+      detail: `Mail: ${_mcpStatusText(mail)} · Calendar: ${_mcpStatusText(calendar)}`,
+      enabled: enabled && connected,
+      protected: true,
+      data: { mail, calendar },
+    };
   }
 
   async function fetchAll() {
@@ -3244,9 +3312,13 @@ async function initUnifiedIntegrations() {
       const detail = [acc.from_address || acc.imap_user, acc.imap_host].filter(Boolean).join(' — ');
       items.push({ type: 'email', id: acc.id, name: label, detail, enabled: acc.enabled !== false, data: acc });
     }
-    // MCP servers
+    // Microsoft 365 Exchange mail/calendar are curated MCP integrations.
     const mcpList = Array.isArray(mcpRes) ? mcpRes : (mcpRes.servers || []);
+    const exchangeItem = _exchangeMcpItem(mcpList);
+    if (exchangeItem) items.push(exchangeItem);
+    // MCP servers
     for (const srv of mcpList) {
+      if (EXCHANGE_MCP_IDS.has(_mcpServerId(srv))) continue;
       const statusText = srv.needs_oauth ? 'needs auth' : srv.status === 'connected' ? `${srv.enabled_tool_count}/${srv.tool_count} tools` : srv.status === 'error' ? 'error' : 'disconnected';
       items.push({ type: 'mcp', id: srv.id || srv.name, name: srv.name || 'MCP Server', detail: statusText, enabled: srv.is_enabled !== false, data: srv });
     }
@@ -3276,6 +3348,10 @@ async function initUnifiedIntegrations() {
     const statusDot = item.enabled
       ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-success,#50fa7b);flex-shrink:0;--notif-glow:var(--color-success,#50fa7b);animation:cookbook-notif-pulse 2s ease-in-out infinite;" title="Active"></span>'
       : '<span style="width:8px;height:8px;border-radius:50%;background:var(--fg);opacity:0.3;flex-shrink:0" title="Disabled"></span>';
+    const removeBtn = item.protected ? '' : `
+      <button class="admin-btn-sm intg-del-btn" data-intg-id="${item.id}" data-intg-type="${item.type}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>`;
     return `<div class="intg-card" data-intg-id="${item.id}" data-intg-type="${item.type}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;cursor:pointer;transition:all 0.15s;" title="Click to edit">
       <span style="opacity:0.6;flex-shrink:0">${t.icon}</span>
       <div style="flex:1;min-width:0">
@@ -3283,9 +3359,7 @@ async function initUnifiedIntegrations() {
         <div style="font-size:11px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.detail || ''}</div>
       </div>
       ${statusDot}
-      <button class="admin-btn-sm intg-del-btn" data-intg-id="${item.id}" data-intg-type="${item.type}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-      </button>
+      ${removeBtn}
     </div>`;
   }
 
@@ -3351,6 +3425,7 @@ async function initUnifiedIntegrations() {
     else if (type === 'caldav') showCalDavForm();
     else if (type === 'contacts' || type === 'carddav') showCardDavForm();
     else if (type === 'email') showEmailForm(editId);
+    else if (type === 'exchange_mcp') showExchangeMcpForm();
     else if (type === 'mcp') showMcpForm(editId);
     else if (type === 'codex') showAgentForm('codex', editId);
     else if (type === 'claude') showAgentForm('claude', editId);
@@ -3488,7 +3563,7 @@ async function initUnifiedIntegrations() {
       if (ntfyHint) {
         ntfyHint.style.display = isNtfy ? 'block' : 'none';
         if (isNtfy) {
-          ntfyHint.innerHTML = 'Enter the ntfy server URL Odysseus can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
+          ntfyHint.innerHTML = 'Enter the ntfy server URL Circitron can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
         }
       }
       if (url) {
@@ -3860,6 +3935,103 @@ async function initUnifiedIntegrations() {
     });
   }
 
+  async function showExchangeMcpForm() {
+    formEl.style.display = '';
+    formEl.innerHTML = '<div class="admin-card" style="margin-top:8px"><span style="opacity:0.5;font-size:11px">Loading Exchange MCP...</span></div>';
+    const _escape = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const _statusColor = (srv) => {
+      if (!srv || srv.is_enabled === false) return 'var(--fg)';
+      if (srv.needs_oauth) return '#e5a33a';
+      if (srv.status === 'connected') return 'var(--green,#50fa7b)';
+      if (srv.status === 'error') return 'var(--red)';
+      return 'var(--fg)';
+    };
+    const _statusLabel = (srv) => {
+      if (!srv) return 'Not configured';
+      if (srv.is_enabled === false) return 'Disabled';
+      if (srv.needs_oauth) return 'Needs authorization';
+      if (srv.status === 'connected') return `Connected (${srv.enabled_tool_count || 0}/${srv.tool_count || 0} tools)`;
+      if (srv.status === 'error') return `Error: ${srv.error || 'unknown'}`;
+      return 'Disconnected';
+    };
+    try {
+      const res = await fetch('/api/mcp/servers', { credentials: 'same-origin' });
+      const servers = await res.json();
+      const list = Array.isArray(servers) ? servers : (servers.servers || []);
+      const byId = new Map(list.map(srv => [_mcpServerId(srv), srv]));
+      const rows = [
+        { kind: 'mail', title: 'Exchange Mail', srv: byId.get(EXCHANGE_MCP.mail) || null },
+        { kind: 'calendar', title: 'Exchange Calendar', srv: byId.get(EXCHANGE_MCP.calendar) || null },
+      ];
+      const rowHtml = rows.map(({ kind, title, srv }) => {
+        const id = _mcpServerId(srv);
+        const hasSrv = !!srv;
+        const status = _statusLabel(srv);
+        const authorize = hasSrv && srv.is_enabled !== false && srv.needs_oauth
+          ? `<a href="/api/mcp/oauth/authorize/${encodeURIComponent(id)}" target="_blank" rel="noopener noreferrer" class="admin-btn-sm" style="background:var(--red);border-color:var(--red);color:#fff;text-decoration:none">Authorize</a>`
+          : '';
+        return `
+          <div class="exchange-mcp-row" data-server-id="${_escape(id)}" data-kind="${_escape(kind)}" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid color-mix(in srgb, var(--fg) 12%, transparent);">
+            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${_statusColor(srv)};opacity:${hasSrv && srv.is_enabled !== false ? '1' : '0.35'};flex-shrink:0"></span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;font-weight:600">${_escape(title)}</div>
+              <div style="font-size:11px;opacity:0.62;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_escape(status)}</div>
+            </div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end">
+              ${authorize}
+              ${hasSrv ? `<button type="button" class="admin-btn-sm exchange-mcp-reconnect">Reconnect</button>` : ''}
+              ${hasSrv ? `<button type="button" class="admin-btn-sm exchange-mcp-toggle">${srv.is_enabled === false ? 'Enable' : 'Disable'}</button>` : ''}
+              ${hasSrv ? `<button type="button" class="admin-btn-sm exchange-mcp-tools">Tools</button>` : ''}
+            </div>
+          </div>`;
+      }).join('');
+      formEl.innerHTML = `
+        <div class="admin-card" style="margin-top:8px">
+          <h2 style="font-size:13px">Microsoft 365 Exchange</h2>
+          <div style="font-size:11px;opacity:0.7;line-height:1.4;margin-bottom:8px">Exchange mail and calendar use the curated MCP servers. Outlook/Office 365 mailbox-password IMAP is no longer the default path for Circit accounts.</div>
+          ${rowHtml}
+          <div style="display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:wrap">
+            <button type="button" class="admin-btn-sm" id="uf-exchange-mcp-refresh">Refresh</button>
+            <button type="button" class="admin-btn-sm" id="uf-exchange-mcp-close" style="opacity:0.7">Close</button>
+            <span id="uf-exchange-mcp-msg" style="font-size:11px"></span>
+          </div>
+        </div>`;
+
+      formEl.querySelectorAll('.exchange-mcp-row').forEach(row => {
+        const id = row.dataset.serverId;
+        const srv = rows.find(x => _mcpServerId(x.srv) === id)?.srv;
+        row.querySelector('.exchange-mcp-reconnect')?.addEventListener('click', async () => {
+          const msg = el('uf-exchange-mcp-msg');
+          msg.textContent = 'Reconnecting...';
+          try {
+            const r = await fetch(`/api/mcp/servers/${encodeURIComponent(id)}/reconnect`, { method: 'POST', credentials: 'same-origin' });
+            const d = await r.json().catch(() => ({}));
+            msg.textContent = d.connected ? `Connected (${d.tool_count || 0} tools)` : `Failed: ${d.error || 'unknown'}`;
+            await renderList();
+            await showExchangeMcpForm();
+          } catch (e) {
+            msg.textContent = 'Reconnect failed: ' + (e.message || 'network error');
+          }
+        });
+        row.querySelector('.exchange-mcp-toggle')?.addEventListener('click', async () => {
+          const fd = new FormData();
+          fd.append('is_enabled', String(!(srv && srv.is_enabled !== false)));
+          await fetch(`/api/mcp/servers/${encodeURIComponent(id)}`, { method: 'PATCH', body: fd, credentials: 'same-origin' });
+          await renderList();
+          await showExchangeMcpForm();
+        });
+        row.querySelector('.exchange-mcp-tools')?.addEventListener('click', () => showMcpForm(id));
+      });
+      el('uf-exchange-mcp-refresh')?.addEventListener('click', async () => {
+        await renderList();
+        await showExchangeMcpForm();
+      });
+      el('uf-exchange-mcp-close')?.addEventListener('click', () => { formEl.style.display = 'none'; });
+    } catch (e) {
+      formEl.innerHTML = `<div class="admin-card" style="margin-top:8px">Failed to load Exchange MCP: ${_escape(e.message || 'network error')}</div>`;
+    }
+  }
+
   // ── Email form (multi-account) ──
   // When editId is a real account id, edit that row. When editId is falsy or 'new',
   // create a fresh account. Posts to /api/email/accounts, never to the legacy
@@ -3882,13 +4054,15 @@ async function initUnifiedIntegrations() {
       + `border:1px solid currentColor;font-size:9px;line-height:11px;text-align:center;`
       + `opacity:0.45;margin-left:5px;cursor:help;vertical-align:1px;font-weight:600;">?</span>`;
     // Provider presets — picking one auto-fills IMAP + SMTP host/port.
+    // Microsoft 365 uses the curated Exchange MCP mail/calendar servers
+    // instead of mailbox-password IMAP/SMTP.
     // Dovecot is IMAP-only here; the host is intentionally blank because
     // it may be remote (DNS, LAN, Tailscale), not localhost.
     const PROVIDERS = {
       gmail:    { label: 'Gmail',                   emailEx: 'you@gmail.com',     imap: { host: 'imap.gmail.com',           port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',     port: 465 } },
       migadu:   { label: 'Migadu',                  emailEx: 'you@yourdomain.com', imap: { host: 'imap.migadu.com',          port: 993, starttls: false }, smtp: { host: 'smtp.migadu.com',    port: 465 } },
       icloud:   { label: 'iCloud',                  emailEx: 'you@icloud.com',    imap: { host: 'imap.mail.me.com',         port: 993, starttls: false }, smtp: { host: 'smtp.mail.me.com',   port: 587 } },
-      outlook:  { label: 'Outlook / Office 365',    emailEx: 'you@outlook.com',   imap: { host: 'outlook.office365.com',    port: 993, starttls: false }, smtp: { host: 'smtp.office365.com', port: 587 } },
+      outlook:  { label: 'Microsoft 365 Exchange (MCP)', emailEx: 'you@circit.io', mcp: true, imap: { host: '', port: 993, starttls: false }, smtp: { host: '', port: 587 } },
       fastmail: { label: 'Fastmail',                emailEx: 'you@fastmail.com',  imap: { host: 'imap.fastmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.fastmail.com',  port: 465 } },
       yahoo:    { label: 'Yahoo',                   emailEx: 'you@yahoo.com',     imap: { host: 'imap.mail.yahoo.com',      port: 993, starttls: false }, smtp: { host: 'smtp.mail.yahoo.com', port: 465 } },
       dovecot:  { label: 'Dovecot IMAP (no SMTP)',  emailEx: 'you@example.com',   imap: { host: '',                         port: 31143, starttls: false }, smtp: { host: '',                   port: 465 } },
@@ -3988,6 +4162,12 @@ async function initUnifiedIntegrations() {
         body: 'Generate an App Password from Yahoo Account Security (requires 2-Step Verification enabled) and paste it as the Password.',
         url: 'https://login.yahoo.com/account/security/app-passwords',
       },
+      outlook: {
+        title: 'Microsoft 365 uses Exchange MCP',
+        body: 'Circit Exchange mail and calendar are served through the curated MCP integrations. Use this route for Outlook/Office 365 instead of IMAP/SMTP mailbox passwords.',
+        action: 'Open Exchange MCP',
+        mcpExchange: true,
+      },
     };
     const noteEl = el('uf-email-provider-note');
     const _copyProviderUrl = async (text) => {
@@ -4018,6 +4198,13 @@ async function initUnifiedIntegrations() {
       noteEl._ufProviderCopyWired = true;
       noteEl.addEventListener('click', async (e) => {
         const copyBtn = e.target.closest?.('.uf-prov-copy');
+        const exchangeBtn = e.target.closest?.('.uf-prov-exchange-mcp');
+        if (exchangeBtn && noteEl.contains(exchangeBtn)) {
+          e.preventDefault();
+          e.stopPropagation();
+          await showExchangeMcpForm();
+          return;
+        }
         if (!copyBtn || !noteEl.contains(copyBtn)) return;
         e.preventDefault();
         e.stopPropagation();
@@ -4039,19 +4226,49 @@ async function initUnifiedIntegrations() {
       const n = PROVIDER_NOTES[key];
       if (!n) { noteEl.style.display = 'none'; noteEl.innerHTML = ''; return; }
       noteEl.style.display = '';
+      if (n.mcpExchange) {
+        noteEl.innerHTML = `
+          <div style="font-weight:600;margin-bottom:3px;">${esc(n.title)}</div>
+          <div style="opacity:0.8;margin-bottom:6px;">${esc(n.body)}</div>
+          <button type="button" class="admin-btn-sm uf-prov-exchange-mcp" style="background:var(--red);border-color:var(--red);color:#fff;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+            ${esc(n.action || 'Open Exchange MCP')}
+          </button>`;
+        return;
+      }
       noteEl.innerHTML = `
         <div style="font-weight:600;margin-bottom:3px;">${esc(n.title)}</div>
         <div style="opacity:0.8;margin-bottom:6px;">${esc(n.body)}</div>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer" class="admin-btn-sm" style="background:var(--red);border-color:var(--red);color:#fff;text-decoration:none;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-            Generate App Password
+            ${esc(n.action || 'Generate App Password')}
           </a>
           <button type="button" class="admin-btn-sm uf-prov-copy" data-url="${esc(n.url)}" style="opacity:0.7;display:inline-flex;align-items:center;gap:5px;">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             Copy link
           </button>
         </div>`;
+    };
+
+    const _setLegacyEmailFieldsDisabled = (disabled) => {
+      [
+        'uf-email-name', 'uf-email-from', 'uf-imap-host', 'uf-imap-port', 'uf-imap-user',
+        'uf-imap-pass', 'uf-imap-starttls', 'uf-smtp-host', 'uf-smtp-port',
+        'uf-smtp-security', 'uf-smtp-same', 'uf-smtp-user', 'uf-smtp-pass',
+        'uf-email-default',
+      ].forEach(id => {
+        const node = el(id);
+        if (!node) return;
+        node.disabled = disabled;
+        node.style.opacity = disabled ? '0.45' : '';
+      });
+    };
+
+    const _openExchangeMcpInstead = async () => {
+      integrationNotice = 'Microsoft 365 Exchange mail and calendar are managed through MCP.';
+      await renderList();
+      await showExchangeMcpForm();
     };
 
     // Custom dropdown wire-up — the native <select> stays in the DOM as the
@@ -4111,7 +4328,8 @@ async function initUnifiedIntegrations() {
       const key = e.target.value;
       _renderProviderNote(key);
       const p = PROVIDERS[key];
-      if (!p) return;
+      if (!p) { _setLegacyEmailFieldsDisabled(false); return; }
+      _setLegacyEmailFieldsDisabled(!!p.mcp);
       el('uf-imap-host').value = p.imap.host;
       el('uf-imap-port').value = p.imap.port;
       el('uf-imap-starttls').checked = !!p.imap.starttls;
@@ -4122,6 +4340,10 @@ async function initUnifiedIntegrations() {
         el('uf-email-from').placeholder = p.emailEx;
         el('uf-imap-user').placeholder = p.emailEx;
         el('uf-smtp-user').placeholder = p.emailEx;
+      }
+      if (p.mcp) {
+        el('uf-email-msg').textContent = 'Use Exchange MCP for Microsoft 365 mail and calendar.';
+        el('uf-email-msg').style.color = 'var(--accent, var(--red))';
       }
     });
 
@@ -4210,6 +4432,10 @@ async function initUnifiedIntegrations() {
     const _checkIcon = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
 
     el('uf-email-test').addEventListener('click', async () => {
+      if (PROVIDERS[el('uf-email-provider')?.value]?.mcp) {
+        await _openExchangeMcpInstead();
+        return;
+      }
       const body = _collectBody();
       // Edit-mode + blank password = use the saved row's stored creds
       // via the account_id shortcut. Other overrides in the body still
@@ -4276,6 +4502,10 @@ async function initUnifiedIntegrations() {
     });
 
     el('uf-email-save').addEventListener('click', async () => {
+      if (PROVIDERS[el('uf-email-provider')?.value]?.mcp) {
+        await _openExchangeMcpInstead();
+        return;
+      }
       const body = _collectBody();
       // Name is optional — fall back to Email so the list still has a label.
       if (!body.name) body.name = body.from_address;
@@ -4530,7 +4760,7 @@ async function initUnifiedIntegrations() {
               <span style="font-size:11px;opacity:0.7">${statusText}</span>
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-              ${srv.needs_oauth ? `<a href="/api/mcp/oauth/authorize/${srv.id}" target="_blank" class="admin-btn-sm" style="background:var(--red);color:#fff;text-decoration:none">Authorize</a>` : ''}
+              ${srv.is_enabled && srv.needs_oauth ? `<a href="/api/mcp/oauth/authorize/${srv.id}" target="_blank" class="admin-btn-sm" style="background:var(--red);color:#fff;text-decoration:none">Authorize</a>` : ''}
               <button class="admin-btn-sm" id="uf-mcp-reconnect">Reconnect</button>
               <button class="admin-btn-sm" id="uf-mcp-toggle">${srv.is_enabled ? 'Disable' : 'Enable'}</button>
               <button class="admin-btn-sm" id="uf-mcp-cancel" style="opacity:0.7">Close</button>
@@ -4722,7 +4952,7 @@ async function initUnifiedIntegrations() {
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
         <h2 style="font-size:13px">${esc(cfg.label)}</h2>
-        <div style="font-size:11px;opacity:0.65;line-height:1.45;margin:-2px 0 8px;">Generates a scoped token + setup commands so ${esc(cfg.word)} on your own machine can read/write your Odysseus data (todos, email, calendar, etc.). The agent runs in your terminal — it isn't streamed inside Odysseus.</div>
+        <div style="font-size:11px;opacity:0.65;line-height:1.45;margin:-2px 0 8px;">Generates a scoped token + setup commands so ${esc(cfg.word)} on your own machine can read/write your Circitron data (todos, email, calendar, etc.). The agent runs in your terminal — it isn't streamed inside Circitron.</div>
         <div class="settings-col">
           <div id="uf-codex-pending" style="display:${current ? 'none' : 'block'};font-size:11px;opacity:0.6;padding:6px 0;">Creating agent...</div>
           <div id="uf-codex-reveal" style="display:none;padding:10px 12px;border:1px solid var(--border);border-left:3px solid var(--accent, var(--red));border-radius:6px;background:rgba(0,0,0,0.04);width:100%;box-sizing:border-box;">
@@ -4742,7 +4972,7 @@ async function initUnifiedIntegrations() {
             </div>
 
             <div style="margin-top:14px;font-weight:600;font-size:11px;margin-bottom:4px;">Configure access</div>
-            <div style="font-size:11px;opacity:0.62;margin-bottom:6px;">Toggle which Odysseus tools this agent can use. New agents start with chat only.</div>
+            <div style="font-size:11px;opacity:0.62;margin-bottom:6px;">Toggle which Circitron tools this agent can use. New agents start with chat only.</div>
             <div id="uf-codex-inline-scopes"></div>
           </div>
           <div style="font-size:11px;font-weight:600;opacity:0.62;margin-top:10px;">${agentTokens.length ? 'Existing agents' : 'Agents'}</div>

@@ -1,0 +1,16 @@
+{
+  "name": "security-validator",
+  "version": "1.0.0",
+  "description": "A security plugin that validates tool usage and blocks dangerous commands",
+  "author": "Test Developer",
+  "hooks": {
+    "PreToolUse": ["hooks/validate_tool_use.json"],
+    "PostToolUse": ["hooks/log_tool_result.json"],
+    "SessionStart": ["hooks/load_project_context.json"]
+  },
+  "permissions": ["read:filesystem", "write:logs"],
+  "settings": {
+    "blocked_commands": ["rm -rf", "chmod 777", "wget.*--no-check-certificate"],
+    "allowed_directories": ["/tmp", "/home/user/projects"]
+  }
+}
