@@ -31,6 +31,9 @@ let _reminderTimer = null;
 // (previously leaked one per openPanel; on multi-open sessions this
 // stacked dozens of identical handlers).
 let _notesKeydownHandler = null;
+// Capture-phase "Esc cancels select mode" listener on document — tracked so it
+// is removed on close instead of leaking +1 per panel open/close cycle.
+let _notesSelectEscHandler = null;
 const REMINDER_FIRED_KEY = 'odysseus-notes-reminder-fired';
 // Note IDs already shown with the entry-glow once. Re-set when the user
 // reschedules the reminder so the new firing glows again on next open.
@@ -53,6 +56,10 @@ function _forceCloseNotesPanel() {
   if (_notesKeydownHandler) {
     document.removeEventListener('keydown', _notesKeydownHandler);
     _notesKeydownHandler = null;
+  }
+  if (_notesSelectEscHandler) {
+    document.removeEventListener('keydown', _notesSelectEscHandler, true);
+    _notesSelectEscHandler = null;
   }
   if (_reminderTimer) {
     clearInterval(_reminderTimer);
@@ -1092,6 +1099,9 @@ export function openPanel() {
   if (_open) return;
   _open = true;
   _editingId = null;
+  // Reset the search filter — the rebuilt pane's search input renders empty, so a
+  // stale _searchQuery would silently hide non-matching notes after a reopen.
+  _searchQuery = '';
   _clearViewedReminderGlows();
   _firedDotDismissedAt = Date.now();
   try { localStorage.setItem(REMINDER_DISMISSED_AT_KEY, String(_firedDotDismissedAt)); } catch {}
@@ -1270,13 +1280,17 @@ export function openPanel() {
   // than a *-bulk-cancel button, so the global Esc-cancel handler in
   // keyboard-shortcuts.js can't reach it — handle it here. Capture phase
   // + stopPropagation so Esc cancels select instead of closing the panel.
-  document.addEventListener('keydown', (e) => {
+  if (_notesSelectEscHandler) {
+    document.removeEventListener('keydown', _notesSelectEscHandler, true);
+  }
+  _notesSelectEscHandler = (e) => {
     if (e.key === 'Escape' && _selectMode) {
       e.preventDefault();
       e.stopPropagation();
       _exitSelectMode();
     }
-  }, true);
+  };
+  document.addEventListener('keydown', _notesSelectEscHandler, true);
   document.getElementById('notes-select-all').addEventListener('change', (e) => {
     if (e.target.checked) _notes.forEach(n => _selectedIds.add(n.id));
     else _selectedIds.clear();
@@ -1579,6 +1593,10 @@ export function closePanel(direction) {
   if (_notesKeydownHandler) {
     document.removeEventListener('keydown', _notesKeydownHandler);
     _notesKeydownHandler = null;
+  }
+  if (_notesSelectEscHandler) {
+    document.removeEventListener('keydown', _notesSelectEscHandler, true);
+    _notesSelectEscHandler = null;
   }
   if (_reminderTimer) {
     clearInterval(_reminderTimer);
