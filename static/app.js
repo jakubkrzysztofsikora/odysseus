@@ -1579,6 +1579,7 @@ function initializeEventListeners() {
   const MODE_TOOLS = [
     { btnId: 'web-toggle-btn',  checkboxId: 'web-toggle',  stateKey: 'web' },
     { btnId: 'bash-toggle-btn', checkboxId: 'bash-toggle', stateKey: 'bash' },
+    { btnId: 'video-toggle-btn', checkboxId: 'video-toggle', stateKey: 'video' },
   ];
 
   function _modeKey(stateKey, mode) { return `${stateKey}_${mode}`; }
@@ -1599,6 +1600,7 @@ function initializeEventListeners() {
   const TOOL_TOGGLE_TOAST_LABELS = {
     web: 'Web search',
     bash: 'Shell',
+    video: 'Video generation',
   };
 
   function showToolToggleToast(stateKey, active) {
@@ -1674,6 +1676,7 @@ function initializeEventListeners() {
     bash: { role: 'Shell Access', text: 'Gives the AI access to a sandboxed shell for running commands, installing packages, and executing scripts. Use with caution.' },
     builder: { role: 'Tool Builder', text: 'Create custom mini-apps and tools the AI can use. Describe what you need and the AI will build a tool you can reuse across conversations.' },
     research: { role: 'Deep Research', text: 'Multi-round web search with source analysis. Takes longer but produces comprehensive, well-sourced answers. Your next message will trigger a deep research cycle.' },
+    video: { role: 'Video Generation', text: 'Turns your next message into a video using Seedance. Your prompt is sent to the generate_video tool (Agent mode) and the clip appears in the chat when ready — generation can take a few minutes.' },
   };
   function _showToolSplash(key) {
     const splash = _toolSplashes[key];
@@ -1728,6 +1731,7 @@ function initializeEventListeners() {
   }
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
+  setupToggle('video-toggle-btn', 'video-toggle', 'video');
   try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
@@ -2008,7 +2012,7 @@ function initializeEventListeners() {
     if (!inputLeft || !overflowMenu || !overflowWrapper) return;
 
     // Buttons that can be collapsed (in reverse priority — last collapsed first)
-    const collapsibleIds = ['bash-toggle-btn', 'web-toggle-btn'];
+    const collapsibleIds = ['video-toggle-btn', 'bash-toggle-btn', 'web-toggle-btn'];
     const collapsibleBtns = collapsibleIds.map(id => el(id)).filter(Boolean);
     // Map of toolbar btn id → overflow mirror element (created dynamically)
     const overflowMirrors = new Map();
@@ -2449,6 +2453,7 @@ function initializeEventListeners() {
     'doc-toggle-btn':      '#overflow-doc-btn',
     'rag-toggle-btn':      '#overflow-rag-btn',
     'bash-toggle-btn':     '#bash-toggle-btn',
+    'video-toggle-btn':    '#video-toggle-btn',
     'overflow-plus-btn':   '.overflow-wrapper',
     'mode-toggle':         '.mode-toggle',
     'preset-mini-btn':     '#overflow-preset-btn',

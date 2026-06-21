@@ -789,6 +789,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (_inject.prefix) _finalMsgWithInject = _inject.prefix + ' ' + _finalMsgWithInject;
       if (_inject.suffix) _finalMsgWithInject = _finalMsgWithInject + ' ' + _inject.suffix;
 
+      // Video toggle: nudge the agent to actually call the generate_video tool
+      // rather than describing a video. The tool is only reachable in Agent
+      // mode, so the mode is forced to 'agent' below when this is on.
+      const _videoOn = !!(el('video-toggle') && el('video-toggle').checked);
+      if (_videoOn) {
+        _finalMsgWithInject = _finalMsgWithInject +
+          '\n\n(Use the generate_video tool to produce an actual video for this request.)';
+      }
+
       const fd = new FormData();
       fd.append('message', _finalMsgWithInject);
       fd.append('session', streamSessionId);
@@ -819,6 +828,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (!isAgentMode && documentModule && documentModule.isPanelOpen() && documentModule.getCurrentDocId()) {
         isAgentMode = true;
       }
+      // Video generation runs as a tool — only reachable in Agent mode.
+      if (_videoOn) isAgentMode = true;
       fd.append('mode', isAgentMode ? 'agent' : 'chat');
       if (el('web-toggle').checked) {
         if (isAgentMode) {
