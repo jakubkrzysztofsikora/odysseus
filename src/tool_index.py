@@ -405,6 +405,25 @@ class ToolIndex:
                    "deep dive", "deep research", "find out about", "study up on",
                    "report on", "do research", "look up everything"}):
             {"trigger_research"},
+        # Image generation intent. Without this, generate_image is only
+        # reachable via ChromaDB embedding retrieval — when ChromaDB is down
+        # the keyword fallback dropped it entirely and the model claimed it
+        # had no image tool.
+        frozenset({"generate an image", "generate image", "create an image",
+                   "make an image", "draw", "draw me", "picture of",
+                   "an illustration", "illustration of", "render an image",
+                   "make a picture", "create a picture", "ai image",
+                   "image of", "paint", "logo for", "artwork"}):
+            {"generate_image"},
+        # Video generation intent (Seedance). Same gap as image gen: no
+        # keyword entry meant "make a video/clip/animation" never surfaced
+        # generate_video when ChromaDB was unavailable.
+        frozenset({"generate a video", "generate video", "create a video",
+                   "make a video", "short clip", "a clip", "video clip",
+                   "animate", "animation", "make a clip", "create a clip",
+                   "ai video", "video of", "seedance", "motion video",
+                   "turn this into a video", "make it move"}):
+            {"generate_video"},
         # Settings-change intent — "change my…/set my…/use X for…/turn on…".
         frozenset({"change my", "set my", "use the voice", "change the voice",
                    "my voice", "tts voice", "search engine", "default model",
