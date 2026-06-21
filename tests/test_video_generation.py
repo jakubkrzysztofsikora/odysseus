@@ -171,3 +171,68 @@ def test_do_generate_video_failed_status(monkeypatch, _patched):
     result = asyncio.run(ai.do_generate_video("bad prompt\n5\n720p", owner=None))
     assert "error" in result
     assert "fail" in result["error"].lower() or "generation" in result["error"].lower()
+
+
+def test_image_to_video_publishes_frame_and_sets_i2v(monkeypatch, _patched, tmp_path):
+    """With image_path, the body becomes image-to-video carrying the public
+    frame URL, and the frame publisher is entered + exited (teardown)."""
+    captured = {}
+
+    class _CaptureClient(_FakeAsyncClient):
+        async def post(self, url, json=None, headers=None, **k):
+            captured["body"] = json
+            return _Resp(200, {"taskId": TASK_ID, "credits": 60})
+
+    monkeypatch.setitem(sys.modules, "httpx", _make_fake_httpx(_CaptureClient))
+
+    events = []
+    PUBLIC_URL = "https://node.tail.ts.net:10000/abc123.jpg"
+
+    class _FakePF:
+        def __init__(self, path):
+            events.append(("init", path))
+            self.public_url = PUBLIC_URL
+
+        async def __aenter__(self):
+            events.append(("enter", None))
+            return self
+
+        async def __aexit__(self, *a):
+            events.append(("exit", None))
+            return False
+
+    import src.frame_publish as fp
+    monkeypatch.setattr(fp, "PublishedFrame", _FakePF, raising=False)
+
+    img = tmp_path / "frame.jpg"
+    img.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
+
+    result = asyncio.run(
+        ai.do_generate_video("boy flying in the wind\n5\n720p", owner=None, image_path=str(img))
+    )
+
+    assert "error" not in result, result
+    body = captured["body"]
+    assert body["input"]["generation_type"] == "image-to-video"
+    assert body["input"]["image_urls"] == [PUBLIC_URL]
+    # Publisher was opened and torn down (frame exposure is bounded).
+    assert ("enter", None) in events
+    assert ("exit", None) in events
+
+
+def test_missing_image_path_stays_text_to_video(monkeypatch, _patched):
+    """A non-existent image_path must not flip to image-to-video."""
+    captured = {}
+
+    class _CaptureClient(_FakeAsyncClient):
+        async def post(self, url, json=None, headers=None, **k):
+            captured["body"] = json
+            return _Resp(200, {"taskId": TASK_ID, "credits": 60})
+
+    monkeypatch.setitem(sys.modules, "httpx", _make_fake_httpx(_CaptureClient))
+    result = asyncio.run(
+        ai.do_generate_video("a kite\n5\n720p", owner=None, image_path="/no/such/file.jpg")
+    )
+    assert "error" not in result, result
+    assert captured["body"]["input"]["generation_type"] == "text-to-video"
+    assert "image_urls" not in captured["body"]["input"]

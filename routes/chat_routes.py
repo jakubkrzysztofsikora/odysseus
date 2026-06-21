@@ -1030,11 +1030,30 @@ def setup_chat_routes(
                 # required here; the generator applies its own defaults for the
                 # remaining (blank) lines.
                 _vid_content = f"{_user_msg}\n\n\n"
+                # If the user attached an image, use the first image attachment as
+                # the start frame (image-to-video). Resolve through the owner-aware
+                # upload resolver so we only read files the user is allowed to read.
+                _vid_image_path = None
+                try:
+                    _auth_mgr = getattr(request.app.state, "auth_manager", None)
+                    for _aid in (att_ids or []):
+                        _info = upload_handler.resolve_upload(
+                            _aid, owner=_user, auth_manager=_auth_mgr
+                        )
+                        _mime = (_info or {}).get("mime", "") or ""
+                        _path = (_info or {}).get("path")
+                        if _path and _mime.startswith("image/"):
+                            _vid_image_path = _path
+                            break
+                except Exception as _are:
+                    logger.warning(f"Video start-frame resolve failed: {_are}")
+                if _vid_image_path:
+                    yield f'data: {json.dumps({"delta": "Using your attached photo as the starting frame…\\n\\n"})}\n\n'
                 # Video generation can take minutes. Run it as a task and emit a
                 # periodic heartbeat comment so the SSE connection survives the
                 # long await (mirrors the research-loop heartbeat format).
                 _vid_task = asyncio.ensure_future(
-                    do_generate_video(_vid_content, session, owner=_user)
+                    do_generate_video(_vid_content, session, owner=_user, image_path=_vid_image_path)
                 )
                 _heartbeat_counter = 0
                 while not _vid_task.done():

@@ -1895,7 +1895,12 @@ def _resolve_video_endpoint(owner: Optional[str] = None) -> Tuple[str, Dict[str,
     }
 
 
-async def do_generate_video(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+async def do_generate_video(
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    image_path: Optional[str] = None,
+) -> Dict:
     """Generate a video using seedance-2-0 via the LiteLLM passthrough.
 
     Content format (newline-separated, parsed defensively):
@@ -1903,6 +1908,12 @@ async def do_generate_video(content: str, session_id: Optional[str] = None, owne
       Line 2: duration in seconds — "5" or "10" (optional, default 5)
       Line 3: resolution — "720p" or "1080p" (optional, default 720p)
       Line 4: aspect_ratio — e.g. "16:9" (optional, default "16:9")
+
+    When ``image_path`` points at a local image, the call becomes
+    *image-to-video*: the frame is downscaled and briefly published to a public
+    https URL via Tailscale Funnel (Seedance requires a public URL for the start
+    frame — it rejects base64 and tailnet/localhost addresses), used as the
+    first frame, and the exposure is torn down when generation finishes.
 
     seedance2.ai is NOT OpenAI-compatible: this submits a create job, polls the
     task until it completes, then downloads the (expiring) CDN mp4 immediately,
@@ -1941,11 +1952,17 @@ async def do_generate_video(content: str, session_id: Optional[str] = None, owne
     # --- Resolve the passthrough base + bearer ------------------------------
     base, headers = _resolve_video_endpoint(owner=owner)
 
+    # image_path → image-to-video. The frame is published to a public funnel
+    # URL inside the httpx block below (it must stay reachable through create +
+    # the whole poll, since seedance fetches it asynchronously while the task
+    # runs), then torn down. ``_frame_ctx`` is the publisher or a no-op.
+    use_i2v = bool(image_path and os.path.exists(image_path))
+
     body = {
         "model": "seedance-2-0",
         "input": {
             "prompt": prompt,
-            "generation_type": "text-to-video",
+            "generation_type": "image-to-video" if use_i2v else "text-to-video",
             "duration": duration,
             "aspect_ratio": aspect_ratio,
             "resolution": resolution,
@@ -1992,9 +2009,24 @@ async def do_generate_video(content: str, session_id: Optional[str] = None, owne
             return ""
 
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
-        ) as client:
+        from contextlib import AsyncExitStack
+
+        async with AsyncExitStack() as _stack:
+            # image-to-video: publish the start frame to a public funnel URL and
+            # keep it up for the duration of this block (create + poll). The
+            # publisher tears the funnel down and deletes the frame on exit.
+            if use_i2v:
+                try:
+                    from src.frame_publish import PublishedFrame
+                    _pf = await _stack.enter_async_context(PublishedFrame(image_path))
+                except Exception as _fe:
+                    return {"error": f"Could not publish start frame for image-to-video: {_fe}"}
+                body["input"]["image_urls"] = [_pf.public_url]
+                logger.info("Video generation: image-to-video, frame=%s", _pf.public_url)
+
+            client = await _stack.enter_async_context(httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+            ))
             # --- CREATE ------------------------------------------------------
             try:
                 resp = await client.post(f"{base}/videos/generations", json=body, headers=headers)
