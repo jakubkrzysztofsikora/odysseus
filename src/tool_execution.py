@@ -1326,8 +1326,12 @@ async def execute_tool_block(
             result = {"error": "Video generation is disabled by the administrator.", "exit_code": 1}
         else:
             from src.ai_interaction import do_generate_video
+            # Forward progress_cb so the multi-minute poll emits periodic
+            # heartbeats — without them the frontend's 60s stall watchdog
+            # aborts the stream and the tool block is stuck "running".
             result = await do_generate_video(
-                _vc, session_id=session_id, owner=owner, image_path=agent_image_path
+                _vc, session_id=session_id, owner=owner,
+                image_path=agent_image_path, progress_cb=progress_cb,
             )
             if isinstance(result, dict) and "error" not in result:
                 result.setdefault("exit_code", 0)

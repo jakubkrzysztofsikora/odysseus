@@ -1900,6 +1900,7 @@ async def do_generate_video(
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
     image_path: Optional[str] = None,
+    progress_cb=None,
 ) -> Dict:
     """Generate a video using seedance-2-0 via the LiteLLM passthrough.
 
@@ -2045,11 +2046,23 @@ async def do_generate_video(
 
             # --- POLL --------------------------------------------------------
             deadline = time.monotonic() + 300  # ~5 min
+            _poll_started = time.monotonic()
             status = None
             data = None
             _fail_reason = ""
             while time.monotonic() < deadline:
                 await asyncio.sleep(5)
+                # Heartbeat so the agent loop forwards a tool_progress SSE event
+                # each tick — generation runs for minutes and the frontend stall
+                # watchdog aborts after 60s of silence otherwise.
+                if progress_cb is not None:
+                    try:
+                        await progress_cb({
+                            "elapsed_s": round(time.monotonic() - _poll_started, 1),
+                            "tail": f"generating video… ({status or 'queued'})",
+                        })
+                    except Exception:
+                        pass
                 try:
                     poll = await client.get(f"{base}/tasks/{task_id}", headers=headers)
                     j = poll.json()
