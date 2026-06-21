@@ -1175,12 +1175,18 @@ async def execute_tool_block(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
+    agent_image_path: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
     `progress_cb` is forwarded to long-running subprocess tools
     (bash, python) so the agent loop can emit `tool_progress` SSE
     events while the command is in flight. Ignored by other tools.
+
+    `agent_image_path` is the resolved path of an image the user attached to
+    this turn. The built-in MCP tool subprocesses can't see attachments, so
+    generate_video is intercepted here and run in-process with the image as a
+    start frame (image-to-video) when one is present.
     """
     from src.tool_implementations import (
         do_create_document, do_update_document, do_edit_document,
@@ -1289,6 +1295,27 @@ async def execute_tool_block(
             "exit_code": 2,
         }
         logger.warning("Tool called with empty arguments: %s", tool)
+        return desc, result
+
+    # generate_video runs in-process (not via the MCP subprocess) so it can use
+    # an attached image as a start frame — the subprocess can't see attachments.
+    # The content carries the prompt; image_path comes from the resolved turn
+    # attachment. Falls back to text-to-video when no image is attached.
+    if tool == "generate_video":
+        from src.settings import get_setting
+        first_line = content.split(chr(10))[0][:80]
+        desc = f"generate_video: {first_line}"
+        if not get_setting("video_gen_enabled", True):
+            result = {"error": "Video generation is disabled by the administrator.", "exit_code": 1}
+        else:
+            from src.ai_interaction import do_generate_video
+            # content is already the "prompt\nduration\nresolution\naspect_ratio"
+            # newline contract do_generate_video parses defensively.
+            result = await do_generate_video(
+                content, session_id=session_id, owner=owner, image_path=agent_image_path
+            )
+            if isinstance(result, dict) and "error" not in result:
+                result.setdefault("exit_code", 0)
         return desc, result
 
     # Route MCP-extracted tools through the MCP manager. Forward

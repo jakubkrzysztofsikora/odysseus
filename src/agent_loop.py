@@ -2292,6 +2292,7 @@ async def stream_agent_loop(
     force_all_mcp_tools: bool = False,
     workspace: Optional[str] = None,
     _is_teacher_run: bool = False,
+    agent_image_path: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -3375,6 +3376,7 @@ async def stream_agent_loop(
                         owner=owner,
                         progress_cb=_push_progress,
                         workspace=workspace,
+                        agent_image_path=agent_image_path,
                     )
                 finally:
                     # Sentinel so the drainer knows to stop.

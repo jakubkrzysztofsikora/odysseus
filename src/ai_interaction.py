@@ -2047,6 +2047,7 @@ async def do_generate_video(
             deadline = time.monotonic() + 300  # ~5 min
             status = None
             data = None
+            _fail_reason = ""
             while time.monotonic() < deadline:
                 await asyncio.sleep(5)
                 try:
@@ -2058,10 +2059,20 @@ async def do_generate_video(
                 status = j.get("status")
                 data = j.get("data")
                 if status in ("completed", "failed"):
+                    _fail_reason = (
+                        j.get("failed_reason")
+                        or j.get("error")
+                        or (data or {}).get("failed_reason")
+                        or ""
+                    )
                     break
 
             if status == "failed":
-                return {"error": f"Video generation failed (task {task_id})"}
+                # Surface the provider's reason — content moderation, an
+                # unusable start frame, etc. — instead of a bare "failed".
+                _reason = (f": {_fail_reason}" if _fail_reason else "")
+                logger.warning("Video generation failed (task %s)%s", task_id, _reason)
+                return {"error": f"Video generation failed (task {task_id}){_reason}"}
             if status != "completed":
                 return {"error": f"Video generation timed out (300s, task {task_id})"}
 

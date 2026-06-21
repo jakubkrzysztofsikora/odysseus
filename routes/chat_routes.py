@@ -1212,6 +1212,25 @@ def setup_chat_routes(
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
 
+                    # Resolve the first image attachment (owner-checked) so the
+                    # in-process generate_video tool can use it as a start frame
+                    # (image-to-video). The agent-tool path otherwise can't see
+                    # attachments — see execute_tool_block's generate_video branch.
+                    _agent_image_path = None
+                    try:
+                        _auth_mgr = getattr(request.app.state, "auth_manager", None)
+                        for _aid in (att_ids or []):
+                            _info = upload_handler.resolve_upload(
+                                _aid, owner=_user, auth_manager=_auth_mgr
+                            )
+                            _mime = (_info or {}).get("mime", "") or ""
+                            _path = (_info or {}).get("path")
+                            if _path and _mime.startswith("image/"):
+                                _agent_image_path = _path
+                                break
+                    except Exception as _are:
+                        logger.warning(f"Agent start-frame resolve failed: {_are}")
+
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
                         sess.model,
@@ -1230,6 +1249,7 @@ def setup_chat_routes(
                         fallbacks=_fallback_candidates,
                         force_all_mcp_tools=multiagent_mode,
                         workspace=workspace or None,
+                        agent_image_path=_agent_image_path,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:

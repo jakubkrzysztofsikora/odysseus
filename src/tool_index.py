@@ -417,12 +417,17 @@ class ToolIndex:
             {"generate_image"},
         # Video generation intent (Seedance). Same gap as image gen: no
         # keyword entry meant "make a video/clip/animation" never surfaced
-        # generate_video when ChromaDB was unavailable.
-        frozenset({"generate a video", "generate video", "create a video",
-                   "make a video", "short clip", "a clip", "video clip",
+        # generate_video when ChromaDB was unavailable. Match must tolerate
+        # filler words between the verb and "video" ("create a SHORT video",
+        # "make a quick video"), so anchor on the noun + generation verbs
+        # rather than only fixed "<verb> a video" phrases.
+        frozenset({"video", "a clip", "video clip", "short clip", "short film",
                    "animate", "animation", "make a clip", "create a clip",
                    "ai video", "video of", "seedance", "motion video",
-                   "turn this into a video", "make it move"}):
+                   "video from", "video based on", "video of the",
+                   "turn this into a video", "make it move", "bring it to life",
+                   "bring this to life", "image to video", "from the image",
+                   "from this image", "from the photo", "from this photo"}):
             {"generate_video"},
         # Settings-change intent — "change my…/set my…/use X for…/turn on…".
         frozenset({"change my", "set my", "use the voice", "change the voice",

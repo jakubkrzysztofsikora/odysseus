@@ -53,6 +53,12 @@ MAX_EXPOSURE_SECONDS = int(os.getenv("ODYSSEUS_FRAME_MAX_EXPOSURE_SECONDS", "600
 MAX_FRAME_EDGE = int(os.getenv("ODYSSEUS_FRAME_MAX_EDGE", "1280"))
 JPEG_QUALITY = int(os.getenv("ODYSSEUS_FRAME_JPEG_QUALITY", "85"))
 
+# Tailscale Funnel exposes a single shareable port (10000), so only one frame
+# can be published at a time. Serialize publishers on this lock — a second
+# image-to-video job waits for the first to finish rather than fighting over
+# the port (which previously caused ConnectTimeout / cross-job collisions).
+_PUBLISH_LOCK = asyncio.Lock()
+
 
 def _tailnet_funnel_host() -> Optional[str]:
     """The node's public funnel hostname, e.g. mac-studio-jakub.<tailnet>.ts.net.
@@ -119,9 +125,25 @@ class PublishedFrame:
         self._source = source_image_path
         self._proc: Optional[subprocess.Popen] = None
         self._frame_path: Optional[Path] = None
+        self._holds_lock = False
         self.public_url: Optional[str] = None
 
     async def __aenter__(self) -> "PublishedFrame":
+        # Single shareable funnel port → only one publisher at a time. Acquire
+        # before touching any port; released in __aexit__.
+        await _PUBLISH_LOCK.acquire()
+        self._holds_lock = True
+        try:
+            return await self._setup()
+        except Exception:
+            # Setup failed mid-way: undo whatever partially came up and free the
+            # lock so the next job isn't blocked forever.
+            await asyncio.to_thread(self._teardown)
+            self._holds_lock = False
+            _PUBLISH_LOCK.release()
+            raise
+
+    async def _setup(self) -> "PublishedFrame":
         host = _tailnet_funnel_host()
         if not host:
             raise RuntimeError(
@@ -192,13 +214,18 @@ class PublishedFrame:
                 self._frame_path.unlink(missing_ok=True)
 
     async def __aexit__(self, *exc) -> None:
-        if getattr(self, "_watchdog", None):
-            self._watchdog.cancel()
-            with contextlib.suppress(Exception):
-                await self._watchdog
-        await asyncio.to_thread(self._teardown)
-        self.public_url = None
-        logger.info("frame_publish: torn down")
+        try:
+            if getattr(self, "_watchdog", None):
+                self._watchdog.cancel()
+                with contextlib.suppress(Exception):
+                    await self._watchdog
+            await asyncio.to_thread(self._teardown)
+            self.public_url = None
+            logger.info("frame_publish: torn down")
+        finally:
+            if self._holds_lock:
+                self._holds_lock = False
+                _PUBLISH_LOCK.release()
 
 
 def cleanup_stale_frames(max_age_seconds: int = MAX_EXPOSURE_SECONDS) -> int:
