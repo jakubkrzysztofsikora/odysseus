@@ -1200,6 +1200,7 @@ def setup_chat_routes(
                 _agent_rounds = 0
                 _agent_tool_calls = 0
                 _answered_by = None  # set if the selected model failed and a fallback answered
+                _pending_video_event = None  # last generate_video tool_output, for disconnect-safe persistence
                 try:
                     from src.settings import get_setting
                     from src.agent_tools import MAX_AGENT_ROUNDS as _DEFAULT_ROUNDS
@@ -1275,6 +1276,23 @@ def setup_chat_routes(
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
+                                    elif data.get("type") == "tool_output" and data.get("video_url"):
+                                        # A generate_video tool finished. Capture it so the
+                                        # turn can be persisted even if the client stream is
+                                        # interrupted before the final [DONE] (video gen runs
+                                        # for minutes; a dropped connection otherwise loses
+                                        # the result and the block looks stuck "running").
+                                        _pending_video_event = {
+                                            "round": data.get("round", _agent_rounds or 1),
+                                            "tool": "generate_video",
+                                            "command": data.get("command", ""),
+                                            "output": data.get("output", ""),
+                                            "exit_code": data.get("exit_code", 0),
+                                        }
+                                        for _vk in ("video_url", "video_id", "video_prompt",
+                                                    "video_model", "video_size"):
+                                            if data.get(_vk):
+                                                _pending_video_event[_vk] = data[_vk]
                                     yield chunk
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
@@ -1292,14 +1310,22 @@ def setup_chat_routes(
                         elif chunk.startswith("event: "):
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
-                            if full_response:
+                            if full_response or _pending_video_event:
                                 _saved_id = save_assistant_response(
-                                    sess, session_manager, session, full_response, last_metrics,
+                                    sess, session_manager, session,
+                                    full_response or (
+                                        f"[Generated video]({_pending_video_event.get('video_url','')})"
+                                        if _pending_video_event else ""
+                                    ),
+                                    last_metrics,
                                     character_name=ctx.preset.character_name,
                                     web_sources=web_sources,
                                     rag_sources=ctx.rag_sources,
                                     used_memories=ctx.used_memories,
                                     incognito=incognito,
+                                    # Persist the video tool block so the clip renders
+                                    # inline on reload (not just the text + link).
+                                    tool_events=[_pending_video_event] if _pending_video_event else None,
                                 )
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
@@ -1324,9 +1350,19 @@ def setup_chat_routes(
                     # outer finally from running and left _active_streams
                     # with a stale entry).
                     try:
-                        if full_response:
-                            logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars)", session, len(full_response))
-                            _stopped_content2, _stopped_md2 = clean_thinking_for_save(full_response, {"stopped": True, "model": sess.model})
+                        if full_response or _pending_video_event:
+                            logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars, video=%s)", session, len(full_response or ""), bool(_pending_video_event))
+                            _md_extra = {"stopped": True, "model": sess.model}
+                            # A generate_video tool finished before the disconnect —
+                            # persist its block so the clip renders on reload instead
+                            # of the turn replaying as a stuck "running" tool.
+                            if _pending_video_event:
+                                _md_extra["tool_events"] = [_pending_video_event]
+                            _save_text = full_response or (
+                                f"[Generated video]({_pending_video_event.get('video_url','')})"
+                                if _pending_video_event else ""
+                            )
+                            _stopped_content2, _stopped_md2 = clean_thinking_for_save(_save_text, _md_extra)
                             sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
                             if not incognito:
                                 session_manager.save_sessions()
