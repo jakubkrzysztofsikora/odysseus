@@ -1303,16 +1303,31 @@ async def execute_tool_block(
     # attachment. Falls back to text-to-video when no image is attached.
     if tool == "generate_video":
         from src.settings import get_setting
-        first_line = content.split(chr(10))[0][:80]
+        # Native-API models send JSON args ({"prompt":...,"duration":...}); text-
+        # tag models send the "prompt\nduration\nresolution\naspect_ratio"
+        # newline contract. Normalize both to the newline contract here.
+        _vc = content
+        _stripped = (content or "").strip()
+        if _stripped.startswith("{"):
+            try:
+                _a = json.loads(_stripped)
+                if isinstance(_a, dict):
+                    _vc = "\n".join([
+                        str(_a.get("prompt", "")),
+                        str(_a.get("duration", "")),
+                        str(_a.get("resolution", "")),
+                        str(_a.get("aspect_ratio", _a.get("aspectRatio", ""))),
+                    ])
+            except (ValueError, TypeError):
+                pass
+        first_line = _vc.split(chr(10))[0][:80]
         desc = f"generate_video: {first_line}"
         if not get_setting("video_gen_enabled", True):
             result = {"error": "Video generation is disabled by the administrator.", "exit_code": 1}
         else:
             from src.ai_interaction import do_generate_video
-            # content is already the "prompt\nduration\nresolution\naspect_ratio"
-            # newline contract do_generate_video parses defensively.
             result = await do_generate_video(
-                content, session_id=session_id, owner=owner, image_path=agent_image_path
+                _vc, session_id=session_id, owner=owner, image_path=agent_image_path
             )
             if isinstance(result, dict) and "error" not in result:
                 result.setdefault("exit_code", 0)
