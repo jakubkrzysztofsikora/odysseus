@@ -541,6 +541,24 @@ export function shortModel(name) {
   return short;
 }
 
+function _normalizeModelName(name) {
+  return shortModel(name).toLowerCase();
+}
+
+export function sameModelName(left, right) {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return _normalizeModelName(left) === _normalizeModelName(right);
+}
+
+export function modelRouteLabel(requestedModel, actualModel) {
+  const requested = shortModel(requestedModel || actualModel);
+  const actual = shortModel(actualModel || requestedModel);
+  if (!requested && !actual) return '...';
+  if (!requested || !actual || sameModelName(requested, actual)) return actual || requested;
+  return `${actual} via ${requested}`;
+}
+
 /**
  * Generate a consistent HSL color for a model name.
  * Returns an hsl() string. The hue is derived from a string hash,
@@ -2336,6 +2354,8 @@ export function addMessage(role, content, modelName, metadata) {
 
 const chatRenderer = {
   shortModel,
+  sameModelName,
+  modelRouteLabel,
   modelColor,
   applyModelColor,
   getModelCost,

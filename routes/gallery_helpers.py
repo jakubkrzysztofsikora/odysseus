@@ -94,10 +94,14 @@ def _extract_exif(content: bytes) -> dict:
 # ---- Helpers ----
 
 def _image_to_dict(img: GalleryImage, session_name: str = None) -> Dict[str, Any]:
+    filename = img.filename or ""
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    is_video = ext in {"mp4", "mov", "webm", "mkv", "m4v"}
     return {
         "id": img.id,
         "filename": img.filename,
         "url": f"/api/generated-image/{img.filename}",
+        "is_video": is_video,
         "prompt": img.prompt,
         "model": img.model,
         "size": img.size,

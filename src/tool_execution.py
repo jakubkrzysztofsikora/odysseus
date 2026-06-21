@@ -590,6 +590,7 @@ _MCP_TOOL_MAP = {
     "web_search":     ("web_search", "web_search"),
     "web_fetch":      ("web_fetch",  "web_fetch"),
     "generate_image": ("image_gen",  "generate_image"),
+    "generate_video": ("video_gen",  "generate_video"),
 }
 
 
@@ -597,6 +598,15 @@ def _parse_generate_image(content: str) -> Dict:
     lines = content.strip().split("\n")
     args = {"prompt": lines[0].strip() if lines else ""}
     for i, key in enumerate(["model", "size", "quality"], 1):
+        if len(lines) > i and lines[i].strip():
+            args[key] = lines[i].strip()
+    return args
+
+
+def _parse_generate_video(content: str) -> Dict:
+    lines = content.strip().split("\n")
+    args = {"prompt": lines[0].strip() if lines else ""}
+    for i, key in enumerate(["duration", "resolution", "aspect_ratio"], 1):
         if len(lines) > i and lines[i].strip():
             args[key] = lines[i].strip()
     return args
@@ -636,6 +646,7 @@ _MCP_ARG_PARSERS: Dict[str, callable] = {
     "read_file":      lambda c: {"path": c.split("\n")[0].strip()},
     "write_file":     _parse_write_file,
     "generate_image": _parse_generate_image,
+    "generate_video": _parse_generate_video,
     "manage_memory":  _parse_manage_memory,
 }
 

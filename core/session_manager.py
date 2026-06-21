@@ -240,8 +240,18 @@ class SessionManager:
             )
             db.add(db_message)
 
+            # Keep the cached Session object in sync. A detached run can hold a
+            # Session instance that was replaced in the cache (e.g. after a page
+            # reload re-hydrated the session from the DB), so a persistence made
+            # through that older instance must also update the currently cached
+            # object. Use object identity to avoid duplicates when the cached
+            # object is the same instance that is calling us.
             if session_id in self.sessions:
-                db_session.message_count = len(self.sessions[session_id].history)
+                cached = self.sessions[session_id]
+                if message not in getattr(cached, "history", []):
+                    cached.history.append(message)
+                cached.message_count = len(cached.history)
+                db_session.message_count = cached.message_count
             else:
                 db_session.message_count = 0
             _now = datetime.now(timezone.utc)

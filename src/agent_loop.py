@@ -276,6 +276,15 @@ Suggest changes with explanations (for review/feedback requests).""",
 ```
 Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
 
+    "generate_video": """\
+```generate_video
+<prompt>
+<duration>
+<resolution>
+<aspect_ratio>
+```
+Generate a video. Line 1 = description, line 2 = duration in seconds (5 or 10), line 3 = resolution (720p or 1080p), line 4 = aspect ratio (e.g. 16:9, 9:16).""",
+
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
@@ -1400,6 +1409,8 @@ def _build_base_prompt(
     disabled = set(disabled_tools or [])
     if not get_setting("image_gen_enabled", True):
         disabled.add("generate_image")
+    if not get_setting("video_gen_enabled", True):
+        disabled.add("generate_video")
 
     if relevant_tools is not None:
         # RAG mode: include always-available + retrieved + admin (if needed)
@@ -1413,7 +1424,7 @@ def _build_base_prompt(
         if not needs_admin:
             # At least strip the management section
             mgmt_tools = set(TOOL_SECTIONS.keys()) - set(ALWAYS_AVAILABLE) - {
-                "generate_image", "suggest_document",
+                "generate_image", "generate_video", "suggest_document",
                 "chat_with_model", "ask_teacher", "list_models",
             }
             agent_prompt = _assemble_prompt(
@@ -3482,6 +3493,10 @@ async def stream_agent_loop(
                         tool_output_data[k] = result[k]
             # Forward image data from generate_image tool
             for k in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
+                if k in result:
+                    tool_output_data[k] = result[k]
+            # Forward video data from generate_video tool
+            for k in ("video_url", "video_id", "video_prompt", "video_model", "video_size"):
                 if k in result:
                     tool_output_data[k] = result[k]
             # Forward screenshots from browser tools (base64 images)

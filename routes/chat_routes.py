@@ -192,6 +192,48 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
     return False
 
 
+_VIDEO_MODEL_CONTAINS = ("seedance",)
+
+
+def _is_video_generation_session(sess, owner: str | None = None) -> bool:
+    """Whether this chat session should bypass text chat and generate video.
+
+    Mirrors ``_is_image_generation_session``: a model name containing a known
+    video marker (e.g. "seedance") routes directly to video. Otherwise the
+    session endpoint must itself be a ``model_type == "video"`` endpoint whose
+    populated model cache includes the selected model — guarding against a video
+    endpoint on the same host misrouting ordinary text models.
+    """
+    model = (getattr(sess, "model", "") or "").strip()
+    model_lower = model.lower()
+    if any(marker in model_lower for marker in _VIDEO_MODEL_CONTAINS):
+        return True
+
+    endpoint_url = (getattr(sess, "endpoint_url", "") or "").strip()
+    if not endpoint_url:
+        return False
+
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        endpoints = q.all()
+        for endpoint in endpoints:
+            if (getattr(endpoint, "model_type", None) or "llm") != "video":
+                continue
+            if not _session_url_matches_endpoint(endpoint_url, getattr(endpoint, "base_url", "") or ""):
+                continue
+            if _endpoint_cache_contains_model(endpoint, model):
+                return True
+    except Exception:
+        return False
+    finally:
+        db.close()
+    return False
+
+
 def _recover_empty_session_model(sess, session_id: str, owner: str | None = None) -> bool:
     """Re-populate sess.model from the matching endpoint's cached models.
 
@@ -967,6 +1009,56 @@ def setup_chat_routes(
                     for _ek in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
                         if _img_result.get(_ek):
                             _ev[_ek] = _img_result[_ek]
+                    sess.add_message(ChatMessage("assistant", full_response, metadata={"tool_events": [_ev], "model": sess.model}))
+                    session_manager.save_sessions()
+                yield f'data: {json.dumps({"type": "metrics", "data": {"total_time": 0}})}\n\n'
+                yield "data: [DONE]\n\n"
+                _active_streams.pop(session, None)
+                return
+            elif _is_video_generation_session(sess, owner=_user):
+                from src.settings import get_setting
+                if not get_setting("video_gen_enabled", True):
+                    yield f'data: {json.dumps({"delta": "Video generation is disabled by the administrator."})}\n\n'
+                    yield "data: [DONE]\n\n"
+                    _active_streams.pop(session, None)
+                    return
+                from src.ai_interaction import do_generate_video
+                _user_msg = message or ""
+                yield f'data: {json.dumps({"type": "tool_start", "tool": "generate_video", "command": _user_msg[:100]})}\n\n'
+                # Build content per do_generate_video contract:
+                # "prompt\nduration\nresolution\naspect_ratio". Only the prompt is
+                # required here; the generator applies its own defaults for the
+                # remaining (blank) lines.
+                _vid_content = f"{_user_msg}\n\n\n"
+                # Video generation can take minutes. Run it as a task and emit a
+                # periodic heartbeat comment so the SSE connection survives the
+                # long await (mirrors the research-loop heartbeat format).
+                _vid_task = asyncio.ensure_future(
+                    do_generate_video(_vid_content, session, owner=_user)
+                )
+                _heartbeat_counter = 0
+                while not _vid_task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(_vid_task), timeout=25)
+                    except asyncio.TimeoutError:
+                        _heartbeat_counter += 1
+                        yield f": heartbeat {_heartbeat_counter}\n\n"
+                _vid_result = _vid_task.result()
+                _vid_output = _vid_result.get("results", _vid_result.get("error", ""))
+                _vid_tool_data = {"type": "tool_output", "tool": "generate_video", "command": _user_msg[:100], "output": _vid_output, "exit_code": 0 if "error" not in _vid_result else 1}
+                for _k in ("video_url", "video_id", "video_prompt", "video_model", "video_size"):
+                    if _k in _vid_result:
+                        _vid_tool_data[_k] = _vid_result[_k]
+                yield f'data: {json.dumps(_vid_tool_data)}\n\n'
+                _desc = _vid_result.get("results", _vid_result.get("error", "Video generation complete"))
+                full_response = _desc
+                yield f'data: {json.dumps({"delta": _desc})}\n\n'
+                # Save to session history
+                if not incognito:
+                    _ev = {"round": 1, "tool": "generate_video", "command": _user_msg[:100], "output": _vid_output, "exit_code": 0 if "error" not in _vid_result else 1}
+                    for _ek in ("video_url", "video_id", "video_prompt", "video_model", "video_size"):
+                        if _vid_result.get(_ek):
+                            _ev[_ek] = _vid_result[_ek]
                     sess.add_message(ChatMessage("assistant", full_response, metadata={"tool_events": [_ev], "model": sess.model}))
                     session_manager.save_sessions()
                 yield f'data: {json.dumps({"type": "metrics", "data": {"total_time": 0}})}\n\n'

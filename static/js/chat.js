@@ -279,6 +279,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       clearTimeout(window._researchTimeoutTimer);
       window._researchTimeoutTimer = null;
     }
+    // TTS autoplay flag (function-scoped so catch/finally can reference it)
+    let streamingTTS = false;
     // Get current session
     const sessionId = sessionModule.getCurrentSessionId();
     const session = sessionModule.getSessions().find(s => s.id === sessionId);
@@ -1067,7 +1069,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let isThinking = false;
       let thinkingStartTime = null;
       // Streaming TTS: synthesize sentence-by-sentence during streaming
-      const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
+      streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)

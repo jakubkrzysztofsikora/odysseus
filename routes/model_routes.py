@@ -520,7 +520,7 @@ _NON_CHAT_CONTAINS = (
     "kosmos", "fuyu", "deplot", "vila", "neva",
     "gliner", "riva", "-parse", "-embedqa", "-nemoretriever",
     "topic-control", "calibration",
-    "ai-synthetic-video", "cosmos-reason2",
+    "ai-synthetic-video", "cosmos-reason2", "seedance",
     "bge", "llama-guard",
 )
 _NON_CHAT_EXACT_PREFIXES = (

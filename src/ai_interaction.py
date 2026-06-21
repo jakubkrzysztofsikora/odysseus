@@ -1813,6 +1813,279 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
         return {"error": f"Image generation error: {str(e)}"}
 
 
+def _resolve_video_endpoint(owner: Optional[str] = None) -> Tuple[str, Dict[str, str]]:
+    """Resolve the seedance video passthrough (base_url, headers).
+
+    Routing is Odysseus -> LiteLLM (:4000) -> seedance2.ai via litellm passthrough.
+    seedance is NOT OpenAI-compatible, so we speak the seedance shape directly at
+    the passthrough path (``{base}/videos/generations`` + ``{base}/tasks/{id}``)
+    using the LiteLLM master key as the bearer.
+
+    Resolution order (most specific first), so this matches whatever the admin
+    actually configured and stays in lock-step with the chat path's
+    ``_is_video_generation_session`` (which keys on a ``model_type=="video"``
+    endpoint or a "seedance" model marker):
+
+      1. A registered ``model_type == "video"`` ModelEndpoint row — reuse its
+         base_url + api_key via ``resolve_endpoint_runtime`` (the established
+         endpoint pattern, same as every other model in odysseus).
+      2. Fallback settings/env: ``get_setting("video_endpoint_base", <default>)``
+         for the base, and ``get_setting("video_endpoint_key", "")`` ->
+         ``os.environ["LITELLM_MASTER_KEY"]`` for the bearer key.
+
+    The returned base always ends ``/seedance/v1`` (the litellm passthrough
+    prefix). Headers always carry ``Authorization: Bearer <litellm master key>``
+    (empty bearer is allowed — a local single-user litellm may run keyless).
+    """
+    import os
+
+    default_base = "http://host.docker.internal:4000/seedance/v1"
+
+    def _norm_base(b: str) -> str:
+        b = (b or "").strip().rstrip("/")
+        # Accept a bare litellm root (".../:4000") and append the passthrough path.
+        if b and not b.endswith("/seedance/v1"):
+            if b.endswith("/seedance"):
+                b += "/v1"
+            elif b.endswith(":4000") or b.endswith("/v1"):
+                b = b.rstrip("/").removesuffix("/v1") + "/seedance/v1"
+        return b
+
+    # 1) Prefer a registered video-type endpoint (reuses existing infra/key).
+    try:
+        from src.database import SessionLocal as _VSL, ModelEndpoint
+        from src.auth_helpers import owner_filter
+        _vdb = _VSL()
+        try:
+            _vq = _vdb.query(ModelEndpoint).filter(
+                ModelEndpoint.is_enabled == True,
+                ModelEndpoint.model_type == "video",
+            )
+            if owner:
+                _vq = owner_filter(_vq, ModelEndpoint, owner)
+            for _vep in _vq.all():
+                try:
+                    _vbase, _vkey = resolve_endpoint_runtime(_vep, owner=owner)
+                except Exception:
+                    continue
+                _vbase = _norm_base(_vbase or "")
+                if _vbase:
+                    return _vbase, {
+                        "Authorization": f"Bearer {(_vkey or '').strip()}",
+                        "Content-Type": "application/json",
+                    }
+        finally:
+            _vdb.close()
+    except Exception as _ve:
+        logger.debug(f"Video endpoint row lookup failed, falling back to settings: {_ve}")
+
+    # 2) Settings / env fallback.
+    try:
+        from src.settings import get_setting
+        base = _norm_base(get_setting("video_endpoint_base", default_base) or default_base)
+        key = (get_setting("video_endpoint_key", "") or "").strip()
+    except Exception:
+        base, key = _norm_base(default_base), ""
+    if not key:
+        key = (os.environ.get("LITELLM_MASTER_KEY", "") or "").strip()
+
+    return (base or _norm_base(default_base)), {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+
+async def do_generate_video(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+    """Generate a video using seedance-2-0 via the LiteLLM passthrough.
+
+    Content format (newline-separated, parsed defensively):
+      Line 1: prompt describing the video (required)
+      Line 2: duration in seconds — "5" or "10" (optional, default 5)
+      Line 3: resolution — "720p" or "1080p" (optional, default 720p)
+      Line 4: aspect_ratio — e.g. "16:9" (optional, default "16:9")
+
+    seedance2.ai is NOT OpenAI-compatible: this submits a create job, polls the
+    task until it completes, then downloads the (expiring) CDN mp4 immediately,
+    saving it under ``GENERATED_IMAGES_DIR`` and recording a ``GalleryImage`` row.
+    """
+    import asyncio
+    import hashlib
+    import os
+    import httpx
+    from pathlib import Path
+
+    lines = content.strip().split("\n") if content else []
+    prompt = lines[0].strip() if lines else ""
+    if not prompt:
+        return {"error": "Video prompt is required (line 1)"}
+
+    # --- Parse + clamp inputs defensively -----------------------------------
+    duration = 5
+    if len(lines) > 1 and lines[1].strip():
+        try:
+            duration = int(float(lines[1].strip()))
+        except (ValueError, TypeError):
+            duration = 5
+    if duration not in (5, 10):
+        # Snap to the nearest allowed value rather than silently rejecting.
+        duration = 10 if duration > 7 else 5
+
+    resolution = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "720p"
+    if resolution not in ("720p", "1080p"):
+        resolution = "720p"
+
+    aspect_ratio = lines[3].strip() if len(lines) > 3 and lines[3].strip() else "16:9"
+    if not aspect_ratio:
+        aspect_ratio = "16:9"
+
+    # --- Resolve the passthrough base + bearer ------------------------------
+    base, headers = _resolve_video_endpoint(owner=owner)
+
+    body = {
+        "model": "seedance-2-0",
+        "input": {
+            "prompt": prompt,
+            "generation_type": "text-to-video",
+            "duration": duration,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+        },
+    }
+
+    logger.info(
+        f"Video generation: model=seedance-2-0, duration={duration}s, "
+        f"resolution={resolution}, aspect_ratio={aspect_ratio}, prompt={prompt[:80]}"
+    )
+
+    def _save_to_gallery(filename: str, file_hash: Optional[str] = None) -> str:
+        """Insert a GalleryImage row for the generated video; return its id (or '')."""
+        try:
+            from src.database import SessionLocal as _GallerySL, GalleryImage
+            # Map "720p"/"1080p" to pixel dims for the 16:9 default; leave None
+            # for non-16:9 since seedance derives W from the aspect ratio.
+            width = height = None
+            if aspect_ratio == "16:9":
+                if resolution == "720p":
+                    width, height = 1280, 720
+                elif resolution == "1080p":
+                    width, height = 1920, 1080
+            new_id = str(uuid.uuid4())
+            _gdb = _GallerySL()
+            _gdb.add(GalleryImage(
+                id=new_id,
+                filename=filename,
+                prompt=prompt,
+                model="seedance-2-0",
+                size=resolution,
+                session_id=session_id,
+                owner=owner,
+                is_active=True,
+                file_hash=file_hash,
+                width=width,
+                height=height,
+            ))
+            _gdb.commit()
+            _gdb.close()
+            return new_id
+        except Exception as _ge:
+            logger.warning(f"Failed to save video gallery record: {_ge}")
+            return ""
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+        ) as client:
+            # --- CREATE ------------------------------------------------------
+            try:
+                resp = await client.post(f"{base}/videos/generations", json=body, headers=headers)
+            except httpx.RequestError as _re:
+                return {"error": f"Could not reach video endpoint ({base}): {_re}"}
+
+            if resp.status_code != 200:
+                return {"error": f"Video submit failed ({resp.status_code}): {resp.text[:300]}"}
+
+            try:
+                task_id = resp.json().get("taskId")
+            except Exception:
+                task_id = None
+            if not task_id:
+                return {"error": "No taskId in seedance response"}
+
+            # --- POLL --------------------------------------------------------
+            deadline = time.monotonic() + 300  # ~5 min
+            status = None
+            data = None
+            while time.monotonic() < deadline:
+                await asyncio.sleep(5)
+                try:
+                    poll = await client.get(f"{base}/tasks/{task_id}", headers=headers)
+                    j = poll.json()
+                except Exception as _pe:
+                    logger.debug(f"Video poll transient error for {task_id}: {_pe}")
+                    continue
+                status = j.get("status")
+                data = j.get("data")
+                if status in ("completed", "failed"):
+                    break
+
+            if status == "failed":
+                return {"error": f"Video generation failed (task {task_id})"}
+            if status != "completed":
+                return {"error": f"Video generation timed out (300s, task {task_id})"}
+
+            results = (data or {}).get("results") or []
+            if not results or not results[0]:
+                return {"error": "Video completed but no result URL was returned"}
+            video_cdn_url = results[0]
+
+            # --- SSRF safety check on the upstream-supplied URL --------------
+            # The CDN URL comes from seedance's response, not our config, so a
+            # compromised/malicious upstream could steer this fetch at internal
+            # or cloud-metadata addresses. Validate exactly like
+            # _fetch_result_image_b64 does before fetching.
+            from src.url_safety import check_outbound_url
+            ok, reason = check_outbound_url(
+                video_cdn_url,
+                block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+            )
+            if not ok:
+                return {"error": f"Upstream returned an unsafe video URL: {reason}"}
+
+            # --- DOWNLOAD immediately (the CDN URL expires) ------------------
+            try:
+                dl = await client.get(video_cdn_url)
+            except httpx.RequestError as _de:
+                return {"error": f"Failed to download generated video: {_de}"}
+            if dl.status_code != 200:
+                return {"error": f"Failed to download generated video ({dl.status_code})"}
+            video_bytes = dl.content
+            if not video_bytes:
+                return {"error": "Downloaded video was empty"}
+
+            # --- SAVE --------------------------------------------------------
+            file_hash = hashlib.sha256(video_bytes).hexdigest()
+            filename = f"{file_hash[:16]}.mp4"  # 16 hex chars satisfies ^[a-f0-9]{8,64}\.mp4$
+            vid_dir = Path(GENERATED_IMAGES_DIR)
+            vid_dir.mkdir(parents=True, exist_ok=True)
+            (vid_dir / filename).write_bytes(video_bytes)
+
+            video_id = _save_to_gallery(filename, file_hash=file_hash)
+
+            return {
+                "results": f"Generated video for: {prompt[:100]}",
+                "video_url": f"/api/generated-image/{filename}",
+                "video_id": task_id,
+                "video_prompt": prompt,
+                "video_model": "seedance-2-0",
+                "video_size": resolution,
+            }
+
+    except httpx.TimeoutException:
+        return {"error": "Video generation timed out. The provider may be overloaded — try again."}
+    except Exception as e:
+        return {"error": f"Video generation error: {str(e)}"}
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher (called from agent_tools.execute_tool_block)
 # ---------------------------------------------------------------------------

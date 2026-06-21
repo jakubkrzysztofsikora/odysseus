@@ -16,6 +16,34 @@ from src.llm_core import _detect_provider, _host_match
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Compatibility shim
+# ---------------------------------------------------------------------------
+def resolve_endpoint_runtime(ep: ModelEndpoint, owner: Optional[str] = None) -> tuple:
+    """Return the raw ``(base_url, api_key)`` tuple for a ``ModelEndpoint``.
+
+    Historically other modules imported ``resolve_endpoint_runtime`` which used
+    to perform a lightweight lookup without the full chat‑model resolution logic.
+    The function was removed during a refactor, causing an ``ImportError`` at
+    application start‑up.  Re‑introducing it as a thin wrapper restores the
+    original contract expected by ``ai_interaction.py`` and other callers.
+
+    Args:
+        ep: ``ModelEndpoint`` ORM instance.
+        owner: Optional user identifier – retained for signature compatibility but
+               currently unused because endpoint ownership is handled elsewhere.
+
+    Returns:
+        ``(base_url, api_key)`` – both may be ``None`` if the endpoint lacks the
+        corresponding fields.
+    """
+    # ``ModelEndpoint`` historically stored the raw URL in ``url`` and the
+    # OpenAI‑compatible base in ``base_url``. Prefer the explicit ``base_url``
+    # when present; fall back to ``url`` for legacy records.
+    base = getattr(ep, "base_url", None) or getattr(ep, "url", None)
+    api_key = getattr(ep, "api_key", None)
+    return base, api_key
+
 # Model-name substrings that are NOT chat/generation models. When an endpoint
 # has no explicit model configured we pick the first CHAT model from its list —
 # never an embedding/tts/etc. (an OpenAI-style endpoint often lists
