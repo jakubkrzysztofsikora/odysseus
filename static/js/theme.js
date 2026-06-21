@@ -194,7 +194,7 @@ const ADV_KEYS = [
   { key: 'sidebarMuted',       css: '--sidebar-muted',     label: 'Sidebar Muted',    group: 'Sidebar' },
   { key: 'sidebarHoverBg',     css: '--sidebar-hover-bg',  label: 'Sidebar Hover',    group: 'Sidebar' },
   { key: 'sidebarActiveBg',    css: '--sidebar-active-bg', label: 'Sidebar Active',   group: 'Sidebar' },
-  { key: 'brandColor',         css: '--brand-color',       label: 'Circit AI Logo',   group: 'Sidebar' },
+  { key: 'brandColor',         css: '--brand-color',       label: 'Odysseus Logo',   group: 'Sidebar' },
   { key: 'hamburgerColor',     css: '--hamburger-color',   label: 'Hamburger Menu',   group: 'Sidebar' },
   { key: 'inputBg',            css: '--input-bg',          label: 'Input Bg',         group: 'Chat Input / Prompt Area' },
   { key: 'inputBorder',        css: '--input-border',      label: 'Input Border',     group: 'Chat Input / Prompt Area' },
@@ -360,8 +360,8 @@ function _updateFavicon(fg) {
   }
   if (!routeShape) {
     link.type = 'image/jpeg';
-    link.href = '/static/vendor/circit-ds/circit-favicon.jpg';
-    apple.href = '/static/vendor/circit-ds/circit-favicon.jpg';
+    link.href = '/static/vendor/circit-ds/odysseus-favicon.svg';
+    apple.href = '/static/vendor/circit-ds/odysseus-favicon.svg';
     return;
   }
   const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>${routeShape.split('__C__').join(fg)}</svg>`;
