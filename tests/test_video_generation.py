@@ -168,9 +168,55 @@ def test_do_generate_video_failed_status(monkeypatch, _patched):
             return _Resp(200, content=VIDEO_BYTES)
 
     monkeypatch.setitem(sys.modules, "httpx", _make_fake_httpx(_FailClient))
+    # No Veo fallback key → the Seedance failure surfaces as the error (the
+    # fallback path is covered by test_failed_status_falls_back_to_veo).
+    monkeypatch.setattr(ai, "_gemini_video_key", lambda: "")
     result = asyncio.run(ai.do_generate_video("bad prompt\n5\n720p", owner=None))
     assert "error" in result
     assert "fail" in result["error"].lower() or "generation" in result["error"].lower()
+
+
+def test_failed_status_falls_back_to_veo(monkeypatch, _patched, tmp_path):
+    """When Seedance fails and a Veo key is set, the Veo fallback produces the
+    video. Mocks both Seedance (fail) and the Veo predictLongRunning flow."""
+    VEO_BYTES = b"\x00\x00\x00\x18ftypmp42veo-fallback-payload" * 256
+
+    class _Client(_FakeAsyncClient):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._veo_polls = 0
+
+        async def post(self, url, json=None, headers=None, **k):
+            if "predictLongRunning" in url:
+                return _Resp(200, {"name": "models/veo/operations/abc"})
+            # Seedance create succeeds; the task then "fails".
+            return _Resp(200, {"taskId": TASK_ID, "credits": 60})
+
+        async def get(self, url, headers=None, **k):
+            if "/tasks/" in url:
+                return _Resp(200, {"status": "failed", "id": TASK_ID,
+                                   "data": {"results": []}, "failed_reason": "capacity"})
+            if "/operations/" in url:
+                self._veo_polls += 1
+                if self._veo_polls < 2:
+                    return _Resp(200, {"done": False})
+                return _Resp(200, {"done": True, "response": {
+                    "generateVideoResponse": {"generatedSamples": [
+                        {"video": {"uri": "https://gen.googleapis.com/v1beta/files/x:download"}}
+                    ]}}})
+            # Final video download.
+            return _Resp(200, content=VEO_BYTES)
+
+    monkeypatch.setitem(sys.modules, "httpx", _make_fake_httpx(_Client))
+    monkeypatch.setattr(ai, "_gemini_video_key", lambda: "test-veo-key")
+    monkeypatch.setattr(ai, "GENERATED_IMAGES_DIR", str(tmp_path), raising=False)
+
+    result = asyncio.run(ai.do_generate_video("a kite\n5\n720p", owner=None))
+    assert "error" not in result, result
+    assert result["video_model"] == "veo-3.1-fast"
+    assert result["video_url"].endswith(".mp4")
+    written = list(tmp_path.glob("*.mp4"))
+    assert len(written) == 1 and written[0].read_bytes() == VEO_BYTES
 
 
 def test_image_to_video_publishes_frame_and_sets_i2v(monkeypatch, _patched, tmp_path):

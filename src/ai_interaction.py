@@ -1895,6 +1895,148 @@ def _resolve_video_endpoint(owner: Optional[str] = None) -> Tuple[str, Dict[str,
     }
 
 
+def _gemini_video_key() -> str:
+    """API key for the Gemini/Veo video fallback (settings, then env)."""
+    import os
+    from src.settings import get_setting
+    return (
+        (get_setting("gemini_video_key", "") or "").strip()
+        or os.environ.get("GEMINI_API_KEY", "").strip()
+        or os.environ.get("GOOGLE_API_KEY", "").strip()
+    )
+
+
+async def _gemini_veo_generate(
+    prompt: str,
+    duration: int,
+    resolution: str,
+    aspect_ratio: str,
+    *,
+    image_path: Optional[str] = None,
+    progress_cb=None,
+) -> Dict:
+    """Generate a video with Google's Veo as a fallback when Seedance fails.
+
+    Uses the Gemini API ``predictLongRunning`` flow: submit a job, poll the
+    operation, then download the (auth-gated) file. Returns the SAME dict shape
+    as ``do_generate_video`` (mp4 saved under GENERATED_IMAGES_DIR + gallery
+    row), or an ``{"error": ...}`` dict. Returns a ``not_configured`` sentinel
+    when no key is set so the caller can keep the original Seedance error.
+    """
+    import asyncio
+    import hashlib
+    import httpx
+    from pathlib import Path
+
+    key = _gemini_video_key()
+    if not key:
+        return {"error": "gemini_not_configured", "_fallback_unavailable": True}
+
+    base = "https://generativelanguage.googleapis.com/v1beta"
+    # Fast preview model — ~30s generations, 720p H.264+AAC.
+    model = "veo-3.1-fast-generate-preview"
+    headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
+
+    instance: Dict = {"prompt": prompt}
+    # Image-to-video: Veo accepts an inline base64 first frame.
+    if image_path and os.path.exists(image_path):
+        try:
+            import base64
+            with open(image_path, "rb") as _f:
+                _b64 = base64.b64encode(_f.read()).decode()
+            _mime = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
+            instance["image"] = {"bytesBase64Encoded": _b64, "mimeType": _mime}
+        except Exception as _ie:
+            logger.warning("Veo i2v: could not read start frame: %s", _ie)
+
+    params: Dict = {"aspectRatio": aspect_ratio or "16:9"}
+    body = {"instances": [instance], "parameters": params}
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+        ) as client:
+            sub = await client.post(
+                f"{base}/models/{model}:predictLongRunning", json=body, headers=headers
+            )
+            if sub.status_code != 200:
+                return {"error": f"Veo submit failed ({sub.status_code}): {sub.text[:200]}"}
+            op_name = (sub.json() or {}).get("name")
+            if not op_name:
+                return {"error": "Veo returned no operation name"}
+
+            deadline = time.monotonic() + 300
+            _started = time.monotonic()
+            video_uri = None
+            while time.monotonic() < deadline:
+                await asyncio.sleep(8)
+                if progress_cb is not None:
+                    try:
+                        await progress_cb({
+                            "elapsed_s": round(time.monotonic() - _started, 1),
+                            "tail": "generating video (Veo fallback)…",
+                        })
+                    except Exception:
+                        pass
+                try:
+                    pr = await client.get(f"{base}/{op_name}", headers=headers)
+                    pj = pr.json()
+                except Exception:
+                    continue
+                if pj.get("done"):
+                    if pj.get("error"):
+                        return {"error": f"Veo generation failed: {str(pj['error'])[:200]}"}
+                    samples = (
+                        (pj.get("response", {}) or {})
+                        .get("generateVideoResponse", {})
+                        .get("generatedSamples", [])
+                    )
+                    if samples:
+                        video_uri = (samples[0].get("video", {}) or {}).get("uri")
+                    break
+            if not video_uri:
+                return {"error": "Veo generation timed out (300s)"}
+
+            # The file URI 302-redirects to the actual CDN bytes — follow it.
+            dl = await client.get(
+                video_uri, headers={"x-goog-api-key": key}, follow_redirects=True
+            )
+            if dl.status_code != 200 or not dl.content:
+                return {"error": f"Failed to download Veo video ({dl.status_code})"}
+            video_bytes = dl.content
+    except httpx.TimeoutException:
+        return {"error": "Veo generation timed out."}
+    except Exception as e:
+        return {"error": f"Veo generation error: {e}"}
+
+    # Save identically to the Seedance path.
+    file_hash = hashlib.sha256(video_bytes).hexdigest()
+    filename = f"{file_hash[:16]}.mp4"
+    vid_dir = Path(GENERATED_IMAGES_DIR)
+    vid_dir.mkdir(parents=True, exist_ok=True)
+    (vid_dir / filename).write_bytes(video_bytes)
+
+    try:
+        from src.database import SessionLocal as _GSL, GalleryImage
+        _g = _GSL()
+        _g.add(GalleryImage(
+            id=str(uuid.uuid4()), filename=filename, prompt=prompt,
+            model="veo-3.1-fast", size=resolution, is_active=True, file_hash=file_hash,
+        ))
+        _g.commit(); _g.close()
+    except Exception as _ge:
+        logger.warning("Veo gallery save failed: %s", _ge)
+
+    return {
+        "results": f"Generated video for: {prompt[:100]} (via Veo fallback)",
+        "video_url": f"/api/generated-image/{filename}",
+        "video_id": "veo",
+        "video_prompt": prompt,
+        "video_model": "veo-3.1-fast",
+        "video_size": resolution,
+    }
+
+
 async def do_generate_video(
     content: str,
     session_id: Optional[str] = None,
@@ -2035,6 +2177,13 @@ async def do_generate_video(
                 return {"error": f"Could not reach video endpoint ({base}): {_re}"}
 
             if resp.status_code != 200:
+                # Seedance rejected the job (e.g. insufficient credits). Try Veo.
+                _fb = await _gemini_veo_generate(
+                    prompt, duration, resolution, aspect_ratio,
+                    image_path=image_path if use_i2v else None, progress_cb=progress_cb,
+                )
+                if not _fb.get("_fallback_unavailable"):
+                    return _fb
                 return {"error": f"Video submit failed ({resp.status_code}): {resp.text[:300]}"}
 
             try:
@@ -2080,13 +2229,23 @@ async def do_generate_video(
                     )
                     break
 
-            if status == "failed":
-                # Surface the provider's reason — content moderation, an
-                # unusable start frame, etc. — instead of a bare "failed".
+            if status in ("failed",) or status != "completed":
+                # Seedance failed or timed out — try the Veo fallback before
+                # giving up. Content-moderation rejections will likely fail on
+                # Veo too, but a provider outage / capacity issue won't.
                 _reason = (f": {_fail_reason}" if _fail_reason else "")
-                logger.warning("Video generation failed (task %s)%s", task_id, _reason)
-                return {"error": f"Video generation failed (task {task_id}){_reason}"}
-            if status != "completed":
+                logger.warning(
+                    "Seedance video %s (task %s)%s — trying Veo fallback",
+                    status or "timeout", task_id, _reason,
+                )
+                _fb = await _gemini_veo_generate(
+                    prompt, duration, resolution, aspect_ratio,
+                    image_path=image_path if use_i2v else None, progress_cb=progress_cb,
+                )
+                if not _fb.get("_fallback_unavailable"):
+                    return _fb
+                if status == "failed":
+                    return {"error": f"Video generation failed (task {task_id}){_reason}"}
                 return {"error": f"Video generation timed out (300s, task {task_id})"}
 
             results = (data or {}).get("results") or []
