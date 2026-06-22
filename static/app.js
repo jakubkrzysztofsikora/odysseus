@@ -1588,7 +1588,13 @@ function initializeEventListeners() {
     const state = loadToggleState();
     const key = _modeKey(stateKey, mode);
     if (Object.prototype.hasOwnProperty.call(state, key)) return !!state[key];
-    return mode === 'agent'; // default: ON in agent, OFF in chat
+    // Video is an imperative tool: when on, chat.js appends a hard "produce an
+    // actual video" directive to EVERY message. Unlike the ambient web/bash
+    // capabilities it must never default on, or agent-mode sessions (e.g. a
+    // research-discussion spinoff) silently turn every turn into a video
+    // command. Require an explicit opt-in.
+    if (stateKey === 'video') return false;
+    return mode === 'agent'; // web/bash: ambient capability, default ON in agent, OFF in chat
   }
 
   function saveToolPref(stateKey, mode, value) {
