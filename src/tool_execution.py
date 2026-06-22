@@ -1249,7 +1249,7 @@ async def execute_tool_block(
         logger.warning("Admin tool blocked for non-admin owner=%r tool=%s", owner, tool)
         return desc, result
 
-    if is_public_blocked_tool(tool) and not _owner_is_admin(owner):
+    if is_public_blocked_tool(tool, owner) and not _owner_is_admin(owner):
         desc = f"{tool}: BLOCKED"
         result = {
             "error": (

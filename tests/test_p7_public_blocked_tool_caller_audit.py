@@ -65,8 +65,10 @@ def test_sole_caller_passes_block_tool_type_not_a_raw_none():
     import src.tool_execution as te
 
     src = inspect.getsource(te.execute_tool_block)
-    # The gate is invoked on the parsed tool name.
-    assert "is_public_blocked_tool(tool)" in src
+    # The gate is invoked on the parsed tool name (first positional arg). The
+    # optional second arg is the owner, used only to honor explicit per-user
+    # privilege grants — it can never turn a non-blocked tool INTO a blocked one.
+    assert "is_public_blocked_tool(tool, owner)" in src
     # `tool` is bound from the parsed block, never to a literal None/"".
     assert "tool = block.tool_type" in src
 
@@ -77,3 +79,28 @@ def test_blocklist_is_nonempty_and_covers_runtime_surface():
     for t in ("bash", "python", "read_file", "write_file", "manage_tokens",
               "vault_unlock", "send_email"):
         assert t in NON_ADMIN_BLOCKED_TOOLS
+
+
+def test_owner_arg_only_relaxes_for_explicit_privilege_grant(monkeypatch):
+    """The owner arg may only UNLOCK a tool the owner was explicitly granted via
+    an auth.json privilege flag; it must never block a tool that is otherwise
+    allowed, and must not unlock tools outside the delegable family."""
+    import src.tool_security as ts
+
+    # A non-admin owner with can_use_bash granted unlocks ONLY the shell/file
+    # family; manage_*/email/vault stay admin-only.
+    monkeypatch.setattr(ts, "_owner_privileges",
+                        lambda o: {"can_use_bash": True})
+    assert ts.is_public_blocked_tool("bash", "granted") is False
+    assert ts.is_public_blocked_tool("python", "granted") is False
+    assert ts.is_public_blocked_tool("read_file", "granted") is False
+    assert ts.is_public_blocked_tool("manage_tokens", "granted") is True
+    assert ts.is_public_blocked_tool("send_email", "granted") is True
+    assert ts.is_public_blocked_tool("vault_unlock", "granted") is True
+
+    # No grant -> the full blocklist still applies.
+    monkeypatch.setattr(ts, "_owner_privileges", lambda o: {})
+    assert ts.is_public_blocked_tool("bash", "plain") is True
+
+    # The owner arg never turns a benign tool INTO a blocked one.
+    assert ts.is_public_blocked_tool("web_search", "granted") is False

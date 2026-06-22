@@ -148,19 +148,67 @@ def plan_mode_disabled_tools() -> Set[str]:
     return (all_names | _PLAN_MODE_KNOWN_MUTATORS) - PLAN_MODE_READONLY_TOOLS
 
 
-def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
+# Blocked tools a non-admin may run when granted a specific privilege flag in
+# auth.json. Maps privilege key → the tool names it unlocks. Only the
+# shell/file family is delegable this way (mirrors the can_use_bash gate in
+# routes/chat_routes.py); the rest of NON_ADMIN_BLOCKED_TOOLS — manage_*,
+# email, vault, model serving — stays strictly admin-only.
+_PRIVILEGE_UNLOCKED_TOOLS = {
+    "can_use_bash": {
+        "bash", "python", "read_file", "write_file", "edit_file",
+        "grep", "glob", "ls", "get_workspace",
+    },
+}
+
+
+def _owner_privileges(owner: Optional[str]) -> dict:
+    """Best-effort read of an owner's auth.json privileges. Fails closed to an
+    empty dict (no extra grants) on any error or unknown owner."""
+    if not owner:
+        return {}
+    try:
+        from core.auth import AuthManager
+
+        auth = AuthManager()
+        if not auth.is_configured:
+            return {}
+        return auth.get_privileges(owner) or {}
+    except Exception as exc:
+        logger.warning("Unable to read privileges for owner=%r: %s", owner, exc)
+        return {}
+
+
+def owner_privilege_unlocked_tools(owner: Optional[str]) -> Set[str]:
+    """Tools this owner may run via a granted privilege flag despite being on
+    the non-admin blocklist. Empty for owners with no relevant privileges."""
+    privs = _owner_privileges(owner)
+    unlocked: Set[str] = set()
+    for key, tools in _PRIVILEGE_UNLOCKED_TOOLS.items():
+        if privs.get(key) is True:
+            unlocked |= tools
+    return unlocked
+
+
+def is_public_blocked_tool(tool_name: Optional[str], owner: Optional[str] = None) -> bool:
     """Return True when a non-admin/public user must not execute this tool.
 
     This is a security gate, so it fails CLOSED: a malformed non-string tool
     name can't be matched against the blocklist or the ``mcp__`` namespace, so
     it is treated as blocked rather than silently allowed through. ``None`` /
     empty string means there is no tool to gate.
+
+    When ``owner`` is supplied, a tool the owner has been explicitly granted via
+    an auth.json privilege flag (see ``_PRIVILEGE_UNLOCKED_TOOLS``) is no longer
+    treated as blocked for that owner.
     """
     if tool_name is None or tool_name == "":
         return False
     if not isinstance(tool_name, str):
         return True
-    return tool_name in NON_ADMIN_BLOCKED_TOOLS or tool_name.startswith("mcp__")
+    blocked = tool_name in NON_ADMIN_BLOCKED_TOOLS or tool_name.startswith("mcp__")
+    if blocked and owner and tool_name in owner_privilege_unlocked_tools(owner):
+        return False
+    return blocked
 
 
 def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
@@ -194,7 +242,11 @@ def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
 
 
 def blocked_tools_for_owner(owner: Optional[str]) -> Set[str]:
-    """Tools to hide/disable for this owner under public-user policy."""
+    """Tools to hide/disable for this owner under public-user policy.
+
+    Admins / single-user mode see no restrictions. Non-admins lose the whole
+    blocklist except any tools unlocked by a granted privilege flag (e.g.
+    ``can_use_bash`` re-enables the shell/file family)."""
     if owner_is_admin_or_single_user(owner):
         return set()
-    return set(NON_ADMIN_BLOCKED_TOOLS)
+    return set(NON_ADMIN_BLOCKED_TOOLS) - owner_privilege_unlocked_tools(owner)
